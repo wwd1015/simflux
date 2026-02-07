@@ -1,0 +1,26 @@
+[package]
+name = "simflux"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "simflux"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }
+numpy = "0.21"
+ndarray = "0.15"
+rand = "0.8"
+rand_distr = "0.4"
+rayon = "1.7"  # Use latest version now that Rust is updated
+nalgebra = "0.32"
+statrs = "0.16"
+thiserror = "1.0"
+
+arrow = "53.0"
+parquet = "53.0"
+
+[dependencies.pyo3-polars]
+version = "0.12"
+features = ["lazy"]
