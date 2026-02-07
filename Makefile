@@ -3,8 +3,8 @@
 
 .PHONY: help install clean build test lint format check dev wheels ci-build docs all
 
-# Default Python version for development
-PYTHON ?= python3
+# Default Python version for development (requires 3.12+)
+PYTHON ?= python3.12
 VENV_DIR ?= venv
 
 # Build configuration

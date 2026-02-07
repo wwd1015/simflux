@@ -35,7 +35,7 @@ echo "Building wheels..."
 
 # Find available Python versions
 PYTHON_VERSIONS=()
-for version in 3.8 3.9 3.10 3.11 3.12; do
+for version in 3.12 3.13; do
     if command -v python${version} &> /dev/null; then
         PYTHON_VERSIONS+=($version)
         echo "✓ Found Python ${version}: $(python${version} --version)"

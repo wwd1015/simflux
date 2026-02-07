@@ -8,7 +8,7 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_TYPE="${BUILD_TYPE:-local}"  # local, ci, cross-platform
-PYTHON_VERSIONS="${PYTHON_VERSIONS:-3.8,3.9,3.10,3.11,3.12}"
+PYTHON_VERSIONS="${PYTHON_VERSIONS:-3.12,3.13}"
 SKIP_TESTS="${SKIP_TESTS:-false}"
 
 cd "$PROJECT_DIR"

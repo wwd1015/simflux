@@ -10,6 +10,12 @@ High-performance financial simulation library with Rust backend for portfolio ri
 - **Flexible Storage**: Optional Parquet-based interim results for detailed analysis
 - **Scalable**: Handle thousands of assets with efficient memory management
 
+## Requirements
+
+- **Python**: 3.12+ (Latest Python versions for optimal performance and modern features)
+- **Operating System**: Windows, macOS, Linux
+- **Optional**: Rust toolchain (only for building from source)
+
 ## Installation
 
 ### From Binary Wheels (Recommended)
