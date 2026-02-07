@@ -20,10 +20,14 @@ local package is discovered.
 
 ### 1.1 Single-Asset GBM
 
+Geometric Brownian Motion (GBM) models asset prices following the stochastic differential equation:
+**dS_t = μ S_t dt + σ S_t dW_t**
+
 ```python
 import numpy as np
 import simflux as sf
 
+# Create GBM with specific parameters
 gbm = sf.GBM(mu=0.05, sigma=0.2, S0=100)
 paths = gbm.simulate(n_paths=1000, n_steps=252, T=1.0)
 
@@ -35,26 +39,45 @@ print(f"Average final value: {paths[:, -1].mean():.2f}")
 # plt.plot(paths[0]); plt.show()
 ```
 
-Key observations:
-- The simulated mean tends toward `S0 * exp(mu * T)`.
-- Variability is governed by `sigma`; decrease it for smoother paths.
+**Parameter Explanations:**
+
+- **`mu=0.05`** *(drift rate)*: Expected annualized return of 5%. This represents the average rate at which the asset price grows over time. A stock with historical average return of 5% would use this value.
+
+- **`sigma=0.2`** *(volatility)*: Annualized standard deviation of 20%. This measures price uncertainty - higher values create more volatile, unpredictable price movements. A typical stock might have 15-30% volatility.
+
+- **`S0=100`** *(initial price)*: Starting asset value of $100. This could represent a stock price, index level, or any financial instrument's current value.
+
+- **`n_paths=1000`** *(simulation paths)*: Number of independent price scenarios to generate. More paths provide better statistical accuracy but require more computation.
+
+- **`n_steps=252`** *(time steps)*: Number of discrete time intervals. 252 represents daily steps over one trading year (252 ≈ business days per year).
+
+- **`T=1.0`** *(time horizon)*: Simulation period of 1 year. Combined with n_steps, this gives dt = T/n_steps = 1/252 ≈ daily time increments.
+
+**Key Observations:**
+- The simulated mean tends toward `S0 * exp(mu * T) = 100 * exp(0.05 * 1) ≈ $105.13`
+- Price variability is governed by `sigma`; lower values produce smoother, less volatile paths
+- Final prices follow a log-normal distribution with parameters derived from mu and sigma
 
 ### 1.2 Correlated Multi-Asset GBM
+
+When modeling portfolios, asset prices don't move independently. Correlated GBM captures how assets co-move through shared market factors, economic conditions, or industry effects.
 
 ```python
 import numpy as np
 import simflux as sf
 
+# Define correlation structure between three assets
 correlation_matrix = np.array([
-    [1.0, 0.5, 0.3],
-    [0.5, 1.0, 0.4],
-    [0.3, 0.4, 1.0],
+    [1.0, 0.5, 0.3],  # Asset 1 correlations with [self, asset2, asset3]
+    [0.5, 1.0, 0.4],  # Asset 2 correlations with [asset1, self, asset3]
+    [0.3, 0.4, 1.0],  # Asset 3 correlations with [asset1, asset2, self]
 ])
 
+# Create correlated simulation with different parameters per asset
 correlated = sf.CorrelatedGBM(
-    mu=[0.08, 0.06, 0.10],
-    sigma=[0.20, 0.25, 0.30],
-    S0=[100, 50, 200],
+    mu=[0.08, 0.06, 0.10],           # Different expected returns
+    sigma=[0.20, 0.25, 0.30],        # Different volatilities
+    S0=[100, 50, 200],               # Different starting prices
     correlation_matrix=correlation_matrix,
 )
 
@@ -65,8 +88,43 @@ final_returns = [(paths[:, i, -1] / paths[:, i, 0]) - 1 for i in range(3)]
 print(np.corrcoef(final_returns))
 ```
 
-The realized correlation should be close to the input matrix once the
-number of simulated paths is large enough.
+**Parameter Explanations:**
+
+**Correlation Matrix Structure:**
+- **`correlation_matrix[i,j]`**: Correlation between asset i and asset j
+- **Diagonal elements = 1.0**: Each asset perfectly correlates with itself
+- **Matrix is symmetric**: correlation(A,B) = correlation(B,A)
+- **Values between -1 and 1**: -1 (perfect negative), 0 (independent), +1 (perfect positive)
+
+**Example Correlation Interpretation:**
+- **`[1.0, 0.5, 0.3]`**: Asset 1 has 50% correlation with Asset 2, 30% with Asset 3
+- **0.5 correlation**: When Asset 1 goes up 10%, Asset 2 tends to go up ~5% on average
+- **0.3 correlation**: Weaker relationship - Asset 3 moves somewhat with Asset 1 but less predictably
+
+**Asset-Specific Parameters:**
+- **`mu=[0.08, 0.06, 0.10]`**: Expected annual returns of 8%, 6%, 10% respectively
+  - Asset 1: Growth stock (8% expected return)
+  - Asset 2: Utility stock (6% lower expected return)
+  - Asset 3: Technology stock (10% higher expected return)
+
+- **`sigma=[0.20, 0.25, 0.30]`**: Annual volatilities of 20%, 25%, 30%
+  - Asset 1: Moderate risk (20% volatility)
+  - Asset 2: Higher risk (25% volatility)
+  - Asset 3: Highest risk (30% volatility)
+
+- **`S0=[100, 50, 200]`**: Starting prices of $100, $50, $200
+  - Different price levels don't affect correlations or returns
+  - Useful for modeling actual market prices
+
+**Financial Intuition:**
+- **High correlation (0.5)** between Assets 1&2: Similar market sectors or geographies
+- **Lower correlation (0.3, 0.4)** with Asset 3: Different industry or market segment
+- **Diversification benefit**: Portfolio risk < weighted average of individual risks due to imperfect correlations
+
+**Output Shape:** `paths.shape = (n_paths, n_assets, n_steps+1)`
+- 1000 simulation scenarios × 3 assets × 253 time points (including t=0)
+
+The realized correlation should closely match the input matrix when using sufficient simulation paths (1000+ typically adequate).
 
 ---
 
@@ -74,15 +132,20 @@ number of simulated paths is large enough.
 
 ### 2.1 Building a Sample Portfolio
 
+Portfolio loss simulation models credit risk using the **Two-Factor Merton Framework**, similar to Moody's RiskFrontier. Each asset can default, and correlations arise from shared systematic risk factors.
+
 ```python
 import simflux as sf
+import numpy as np
 
+# Define sector-level correlation structure
 sector_corr = np.array([
-    [1.0, 0.15, 0.05],
-    [0.15, 1.0, 0.10],
-    [0.05, 0.10, 1.0],
+    [1.0, 0.15, 0.05],   # Technology sector correlations
+    [0.15, 1.0, 0.10],   # Finance sector correlations
+    [0.05, 0.10, 1.0],   # Healthcare sector correlations
 ])
 
+# Create a portfolio with realistic sector distribution
 portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
     n_assets_per_sector=[50, 30, 20],
     sectors=["Technology", "Finance", "Healthcare"],
@@ -96,40 +159,84 @@ for sector, info in summary['sectors'].items():
     print(f"  {sector}: {info['n_assets']} assets, PD={info['avg_pd']:.3f}, LGD={info['avg_lgd']:.3f}")
 ```
 
-The two-factor correlation structure assigns each sector a systematic
-shock whose pairwise correlation comes directly from the provided
-`sector_correlation_matrix`. Assets load on that sector shock with weight
-`sqrt(intra_sector)` and carry the remaining variance in an idiosyncratic
-component with weight `sqrt(1 - intra_sector)`. Assets in the same sector
-therefore match the configured intra correlation, while cross-sector
-pairs exhibit correlation `sqrt(intra_s) * sqrt(intra_t) * sector_matrix[s, t]`.
+**Parameter Explanations:**
+
+**Sector Correlation Matrix (`sector_corr`):**
+- **`[1.0, 0.15, 0.05]`**: Technology has 15% correlation with Finance, 5% with Healthcare
+- **Economic interpretation:**
+  - **0.15 (Tech-Finance)**: Moderate correlation - both affected by interest rates, economic cycles
+  - **0.05 (Tech-Healthcare)**: Low correlation - different business cycles and risk factors
+  - **0.10 (Finance-Healthcare)**: Low-moderate correlation - some shared economic sensitivity
+
+**Portfolio Structure Parameters:**
+- **`n_assets_per_sector=[50, 30, 20]`**: Portfolio composition
+  - 50 Technology companies (e.g., software, hardware firms)
+  - 30 Financial institutions (e.g., banks, insurance companies)
+  - 20 Healthcare companies (e.g., pharmaceuticals, medical devices)
+  - Total: 100 assets with sector diversification
+
+- **`sectors=["Technology", "Finance", "Healthcare"]`**: Sector labels for categorization and reporting
+
+**Intra-Sector Correlations:**
+- **`"Technology": 0.35`**: Tech companies have 35% average correlation
+  - Shared exposure to: innovation cycles, technology adoption, venture capital
+- **`"Finance": 0.45`**: Financial firms have 45% average correlation
+  - Shared exposure to: interest rates, credit cycles, regulatory changes
+- **`"Healthcare": 0.30`**: Healthcare companies have 30% average correlation
+  - Shared exposure to: drug approvals, healthcare policy, demographic trends
+
+**Two-Factor Correlation Model:**
+
+The framework decomposes each asset's risk into:
+
+1. **Systematic Factor (Sector)**: Shared risk affecting all assets in the sector
+   - Weight: `√(intra_sector_correlation)`
+   - Correlation between sectors determined by `sector_correlation_matrix`
+
+2. **Idiosyncratic Factor (Asset-specific)**: Company-specific risk
+   - Weight: `√(1 - intra_sector_correlation)`
+   - Independent across all assets
+
+**Resulting Correlation Structure:**
+- **Same sector**: Correlation = `intra_sector_correlation`
+  - Tech-Tech pairs: 0.35 correlation
+- **Cross-sector**: Correlation = `√(intra_s) × √(intra_t) × sector_matrix[s,t]`
+  - Tech-Finance pair: √(0.35) × √(0.45) × 0.15 ≈ 0.06 correlation
+
+**Credit Risk Parameters (Auto-Generated):**
+- **PD (Probability of Default)**: Likelihood asset defaults within 1 year
+  - Typically 1-5% for investment grade, higher for risky assets
+- **LGD (Loss Given Default)**: Percentage of exposure lost if default occurs
+  - Typically 40-60%, depending on seniority and collateral
 
 #### Building from a DataFrame
 
-If your input data already lives in tabular form you can skip the helper
-and instantiate the portfolio directly from a `pandas.DataFrame`.
+For real-world applications, you'll often have asset data in tabular form from databases or spreadsheets. This example shows how to construct portfolios from detailed asset data.
 
 ```python
 import pandas as pd
 import numpy as np
 import simflux as sf
 
+# Define specific assets with their risk characteristics
 asset_table = pd.DataFrame({
     "asset_id": [1, 2, 3, 4],
     "sector": ["Technology", "Technology", "Finance", "Healthcare"],
-    "pd": [0.02, 0.035, 0.05, 0.03],
-    "lgd_mean": [0.6, 0.55, 0.45, 0.5],
-    "lgd_std": [0.2, 0.18, 0.15, 0.17],
-    "exposure": [1.2e6, 0.8e6, 1.5e6, 1.1e6],
-    "intra_sector_correlation": [0.40, 0.40, 0.45, 0.30],
+    "pd": [0.02, 0.035, 0.05, 0.03],                    # Probability of Default
+    "lgd_mean": [0.6, 0.55, 0.45, 0.5],                # Loss Given Default (mean)
+    "lgd_std": [0.2, 0.18, 0.15, 0.17],                # Loss Given Default (std)
+    "exposure": [1.2e6, 0.8e6, 1.5e6, 1.1e6],          # Exposure amount
+    "intra_sector_correlation": [0.40, 0.40, 0.45, 0.30], # Asset-specific correlations
 })
 
+# Sector correlations (same as before)
 sector_corr = np.array([
-    [1.0, 0.25, 0.10],
-    [0.25, 1.0, 0.15],
-    [0.10, 0.15, 1.0],
+    [1.0, 0.25, 0.10],     # Technology correlations
+    [0.25, 1.0, 0.15],     # Finance correlations
+    [0.10, 0.15, 1.0],     # Healthcare correlations
 ])
 
+# Build portfolio from detailed data
 portfolio = sf.TwoFactorPortfolio(
     assets=asset_table,
     sector_correlation_matrix=sector_corr,
@@ -138,17 +245,53 @@ portfolio = sf.TwoFactorPortfolio(
 print(portfolio.get_portfolio_summary()["correlation_structure"])
 ```
 
-`AssetData.from_dataframe` automatically creates sector identifiers and
-consumes the optional `intra_sector_correlation` column so you can keep
-per-sector preferences next to the raw asset inputs. Only the required
-columns (`asset_id`, `sector`, `pd`, `lgd_mean`, `lgd_std`, `exposure`)
-must be present; any omitted intra-sector metadata falls back to the
-defaults used earlier, while `sector_correlation_matrix` remains an
-explicit constructor argument.
+**Asset Table Column Explanations:**
+
+**Required Columns:**
+- **`asset_id`**: Unique identifier for each asset (loan, bond, counterparty)
+- **`sector`**: Industry classification determining correlation structure
+- **`pd`** *(Probability of Default)*: Annual default probability as decimal
+  - Asset 1: 2.0% (investment grade technology firm)
+  - Asset 2: 3.5% (higher-risk technology startup)
+  - Asset 3: 5.0% (financial institution with credit risk)
+  - Asset 4: 3.0% (stable healthcare company)
+
+- **`lgd_mean`** *(Loss Given Default - Mean)*: Expected loss percentage if default occurs
+  - Asset 1: 60% (unsecured technology loan)
+  - Asset 2: 55% (some equipment collateral)
+  - Asset 3: 45% (secured bank financing)
+  - Asset 4: 50% (healthcare equipment backing)
+
+- **`lgd_std`** *(Loss Given Default - Standard Deviation)*: Uncertainty in recovery
+  - Higher values indicate more uncertain recovery rates
+  - Reflects collateral quality, legal jurisdiction, asset liquidity
+
+- **`exposure`**: Dollar amount at risk
+  - Asset 1: $1.2M exposure to technology firm
+  - Asset 2: $0.8M exposure to tech startup
+  - Asset 3: $1.5M exposure to bank
+  - Asset 4: $1.1M exposure to healthcare company
+
+**Optional Column:**
+- **`intra_sector_correlation`**: Asset-specific correlation within its sector
+  - Allows fine-tuning beyond sector-wide defaults
+  - Asset 3: 0.45 (higher correlation typical of financial sector)
+  - Asset 4: 0.30 (lower correlation for diversified healthcare)
+
+**Flexibility Features:**
+- **Missing columns**: Use sector-wide defaults for intra-correlations
+- **Automatic processing**: `AssetData.from_dataframe` handles data conversion
+- **Mixed specifications**: Combine sector defaults with asset-specific overrides
+- **Scalability**: Handles portfolios from dozens to thousands of assets
+
+This approach enables realistic modeling of actual credit portfolios with varying risk characteristics, exposures, and correlation structures.
 
 ### 2.2 Running Simulations
 
+Once your portfolio is configured, run Monte Carlo simulations to calculate risk metrics used in regulatory capital, economic capital, and stress testing.
+
 ```python
+# Run Monte Carlo simulation
 results = portfolio.simulate(n_simulations=50_000)
 stats = results["portfolio_statistics"]
 
@@ -160,6 +303,52 @@ print("\nSector highlights")
 for sector, sector_stats in results["sector_statistics"].items():
     print(f"  {sector}: 95% VaR = {sector_stats['var_95']:,.0f}")
 ```
+
+**Simulation Parameters:**
+- **`n_simulations=50_000`**: Number of Monte Carlo scenarios
+  - More simulations → more accurate tail risk estimates
+  - 50K typical for production risk measurement
+  - 10K adequate for development/testing
+
+**Output Risk Metrics Explained:**
+
+**Core Statistics:**
+- **`mean`**: Expected loss under normal conditions
+  - Mathematical expectation: Σ(PD × LGD × Exposure) across all assets
+  - Used for loss provisioning and pricing
+
+- **`std_dev`**: Standard deviation of loss distribution
+  - Measures portfolio loss volatility
+  - Indicates concentration vs diversification benefits
+
+**Value at Risk (VaR) Metrics:**
+- **`var_95`**: 95th percentile loss (95% VaR)
+  - "We expect losses to exceed this amount only 5% of the time"
+  - Regulatory capital requirement baseline
+
+- **`var_99`**: 99th percentile loss (99% VaR)
+  - "We expect losses to exceed this amount only 1% of the time"
+  - Common economic capital standard
+
+- **`var_999`**: 99.9th percentile loss (99.9% VaR)
+  - "We expect losses to exceed this amount only 0.1% of the time"
+  - Stress testing and extreme risk measurement
+
+**Expected Shortfall (Conditional VaR):**
+- **`expected_shortfall_99`**: Average loss when losses exceed 99% VaR
+  - Measures tail risk beyond VaR
+  - "Given that we're in the worst 1% of scenarios, what's the average loss?"
+  - More comprehensive than VaR for risk management
+
+**Extreme Statistics:**
+- **`max_loss`**: Worst-case loss across all simulations
+  - Helpful for stress testing and scenario analysis
+  - Should approach total portfolio exposure in extreme cases
+
+**Sector Breakdown:**
+- **Sector VaRs**: Risk attribution by industry
+  - Identifies concentration risks
+  - Supports sector limit setting and diversification strategies
 
 ### 2.3 Sensitivity to Correlations
 
