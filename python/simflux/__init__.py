@@ -1,0 +1,30 @@
+"""
+SimFlux: High-performance financial simulation library with Rust backend
+
+A comprehensive library for stochastic process simulation and portfolio risk modeling,
+featuring:
+- Correlated Geometric Brownian Motion simulation
+- Two-factor portfolio loss modeling (Merton framework)  
+- Efficient Rust backend for performance-critical operations
+- Flexible Parquet-based storage for interim results analysis
+"""
+
+from .processes.gbm import GBM, CorrelatedGBM
+from .portfolio.two_factor_model import TwoFactorPortfolio, AssetData
+from .portfolio.correlation import TwoFactorCorrelationStructure
+from .utils.storage import StorageConfig, ParquetResultsAnalyzer
+from .core.engine import SimulationEngine
+
+__version__ = "0.1.0"
+__author__ = "SimFlux Contributors"
+
+__all__ = [
+    "GBM",
+    "CorrelatedGBM", 
+    "TwoFactorPortfolio",
+    "AssetData",
+    "TwoFactorCorrelationStructure",
+    "StorageConfig",
+    "ParquetResultsAnalyzer",
+    "SimulationEngine"
+]
