@@ -10,6 +10,10 @@ featuring:
 """
 
 from .processes.gbm import GBM, CorrelatedGBM
+from .processes.time_varying import (
+    TimeVaryingGBM,
+    TimeVaryingCorrelatedGBM
+)
 from .portfolio.two_factor_model import TwoFactorPortfolio, AssetData
 from .portfolio.correlation import TwoFactorCorrelationStructure
 from .utils.storage import StorageConfig, ParquetResultsAnalyzer
@@ -19,11 +23,20 @@ __version__ = "0.1.0"
 __author__ = "SimFlux Contributors"
 
 __all__ = [
+    # Standard GBM
     "GBM",
-    "CorrelatedGBM", 
+    "CorrelatedGBM",
+
+    # Time-varying GBM
+    "TimeVaryingGBM",
+    "TimeVaryingCorrelatedGBM",
+
+    # Portfolio modeling
     "TwoFactorPortfolio",
     "AssetData",
     "TwoFactorCorrelationStructure",
+
+    # Storage and utilities
     "StorageConfig",
     "ParquetResultsAnalyzer",
     "SimulationEngine"

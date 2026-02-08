@@ -126,6 +126,127 @@ print(np.corrcoef(final_returns))
 
 The realized correlation should closely match the input matrix when using sufficient simulation paths (1000+ typically adequate).
 
+### 1.3 Time-Varying Parameters
+
+Real markets don't have constant returns and volatilities. SimFlux supports **time-varying parameters** by accepting simple time series arrays for mu (drift) and sigma (volatility).
+
+#### Simple Time-Varying Single Asset GBM
+
+```python
+import numpy as np
+import simflux as sf
+
+# Define time series for mu (drift/return)
+mu_times = [0.0, 0.25, 0.75, 1.0]          # Time points
+mu_values = [0.08, -0.15, 0.12, 0.08]      # Corresponding mu values
+
+# Define time series for sigma (volatility)
+sigma_times = [0.0, 0.25, 0.75, 1.0]       # Time points
+sigma_values = [0.20, 0.45, 0.25, 0.20]    # Corresponding sigma values
+
+# Create time-varying GBM
+gbm = sf.TimeVaryingGBM(
+    mu_times=mu_times,
+    mu_values=mu_values,
+    sigma_times=sigma_times,
+    sigma_values=sigma_values,
+    S0=100  # Initial price
+)
+
+# Simulate paths
+paths = gbm.simulate(n_paths=1000, n_steps=252, T=1.0)
+```
+
+**What this does:**
+- **t=0.0 to 0.25**: Normal market (8% return, 20% volatility)
+- **t=0.25 to 0.75**: Crisis period (-15% return, 45% volatility)
+- **t=0.75 to 1.0**: Recovery (12% return, 25% volatility)
+
+Linear interpolation is used between time points, so parameters change smoothly.
+
+#### Multi-Asset Time-Varying GBM
+
+```python
+# Tech stock - high growth, volatile
+tech_mu_times = [0.0, 0.3, 1.0]
+tech_mu_values = [0.15, -0.10, 0.20]       # 15% -> -10% -> 20%
+tech_sigma_times = [0.0, 0.3, 1.0]
+tech_sigma_values = [0.25, 0.60, 0.30]     # 25% -> 60% -> 30%
+
+# Bank stock - stable, crisis-affected
+bank_mu_times = [0.0, 0.5, 1.0]
+bank_mu_values = [0.06, 0.02, 0.08]        # 6% -> 2% -> 8%
+bank_sigma_times = [0.0, 0.5, 1.0]
+bank_sigma_values = [0.18, 0.35, 0.22]     # 18% -> 35% -> 22%
+
+# Correlation matrix
+correlation_matrix = np.array([[1.0, 0.4], [0.4, 1.0]])
+
+# Create multi-asset time-varying GBM
+multi_gbm = sf.TimeVaryingCorrelatedGBM(
+    mu_times=[tech_mu_times, bank_mu_times],
+    mu_values=[tech_mu_values, bank_mu_values],
+    sigma_times=[tech_sigma_times, bank_sigma_times],
+    sigma_values=[tech_sigma_values, bank_sigma_values],
+    S0=[100, 100],
+    correlation_matrix=correlation_matrix
+)
+
+# Simulate correlated paths
+multi_paths = multi_gbm.simulate(n_paths=1000, n_steps=252, T=1.0)
+# Returns shape: (n_paths, n_assets, n_steps + 1)
+```
+
+#### Check Parameter Evolution
+
+```python
+# See how parameters change over time
+mu, sigma = gbm.get_parameters_at_time(0.4)  # Get values at t=0.4
+print(f"At t=0.4: μ={mu:.1%}, σ={sigma:.1%}")
+
+# Or get evolution over time
+for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
+    mu, sigma = gbm.get_parameters_at_time(t)
+    print(f"t={t:.2f}: μ={mu:+.1%}, σ={sigma:.1%}")
+```
+
+#### Common Use Cases
+
+**Market Crisis Simulation:**
+```python
+# Normal -> Crisis -> Recovery
+mu_times = [0.0, 0.2, 0.8, 1.0]
+mu_values = [0.08, -0.25, 0.12, 0.08]
+sigma_times = [0.0, 0.2, 0.8, 1.0]
+sigma_values = [0.18, 0.55, 0.30, 0.20]
+```
+
+**Gradual Economic Change:**
+```python
+# Slow transition over 2 years
+mu_times = [0.0, 2.0]
+mu_values = [0.03, 0.12]  # 3% to 12% return
+sigma_times = [0.0, 2.0]
+sigma_values = [0.15, 0.25]  # 15% to 25% volatility
+```
+
+**Interest Rate Cycle:**
+```python
+# Quarterly rate changes
+quarters = np.arange(0, 2.1, 0.25)  # 0, 0.25, 0.5, ..., 2.0
+mu_rates = 0.05 + 0.03 * np.sin(2 * np.pi * quarters / 2.0)  # 2-year cycle
+sigma_rates = 0.20 + 0.05 * np.cos(2 * np.pi * quarters / 2.0)
+```
+
+**Benefits of Time-Varying Parameters:**
+- **Realistic Market Modeling**: Capture regime changes, crises, cycles
+- **Stress Testing**: Model extreme scenarios with high volatility periods
+- **Economic Cycles**: Incorporate business cycle effects
+- **Policy Changes**: Model impact of central bank decisions
+- **Sector Rotation**: Different assets can have different time-varying patterns
+
+The time-varying approach provides much more realistic simulations compared to constant parameters, while remaining simple to use with just time series arrays.
+
 ---
 
 ## 2. Portfolio Loss Simulation
