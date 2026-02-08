@@ -8,7 +8,6 @@ import numpy as np
 from typing import Union, List, Optional, Tuple
 
 from ..core.base import BaseSimulator, SimulationConfig
-from ..core.engine import SimulationEngine
 
 
 class TimeVaryingGBM(BaseSimulator):
@@ -111,6 +110,8 @@ class TimeVaryingGBM(BaseSimulator):
         np.ndarray
             Simulated paths of shape (n_paths, n_steps + 1)
         """
+        self.validate_inputs(n_paths, n_steps, T)
+
         dt = T / n_steps
         times = np.linspace(0, T, n_steps + 1)
 
@@ -239,6 +240,8 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
         np.ndarray
             Simulated paths of shape (n_paths, n_assets, n_steps + 1)
         """
+        self.validate_inputs(n_paths, n_steps, T)
+
         dt = T / n_steps
         times = np.linspace(0, T, n_steps + 1)
 
