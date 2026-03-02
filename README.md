@@ -5,8 +5,9 @@ High-performance financial simulation library with Rust backend for portfolio ri
 ## Features
 
 - **Correlated GBM Simulation**: Multi-series Geometric Brownian Motion with correlation structures
+- **Time-Varying Parameters**: GBM with time-dependent drift and volatility via direct time series input
 - **Portfolio Loss Modeling**: Two-factor Merton framework similar to Moody's RiskFrontier
-- **High Performance**: Rust backend for critical computational paths
+- **High Performance**: Rust backend for critical computational paths, vectorized NumPy fallback
 - **Flexible Storage**: Optional Parquet-based interim results for detailed analysis
 - **Scalable**: Handle thousands of assets with efficient memory management
 
@@ -78,15 +79,36 @@ gbm_multi = sf.CorrelatedGBM(
 paths = gbm_multi.simulate(n_paths=1000, n_steps=252, T=1.0)
 ```
 
+### Time-Varying GBM
+
+```python
+# Single asset with time-dependent parameters
+tv_gbm = sf.TimeVaryingGBM(
+    mu_times=[0, 0.5, 1.0], mu_values=[0.05, 0.08, 0.03],
+    sigma_times=[0, 0.5, 1.0], sigma_values=[0.2, 0.3, 0.15],
+    S0=100
+)
+paths = tv_gbm.simulate(n_paths=1000, n_steps=252, T=1.0)
+```
+
 ### Portfolio Loss Simulation
 
 ```python
-# Define portfolio
-portfolio = sf.TwoFactorPortfolio(
-    assets=asset_data,  # DataFrame with PD, LGD parameters
-    sector_mapping=sector_map,
+# Quick start with sample portfolio
+portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+    n_assets_per_sector=100,
+    sectors=['Technology', 'Finance', 'Healthcare'],
+    intra_sector_correlations=0.4,
     inter_sector_correlation=0.2,
-    intra_sector_correlation=0.4
+    systematic_lgd_correlation=0.3,
+)
+
+# Or build from asset data
+portfolio = sf.TwoFactorPortfolio(
+    assets=asset_data,  # List[AssetData] or DataFrame with pd, lgd_mean, lgd_std, exposure, sector
+    intra_sector_correlations={'Technology': 0.5, 'Finance': 0.4},
+    sector_correlation_matrix=sector_corr_matrix,  # np.ndarray, optional
+    systematic_lgd_correlation=0.3,
 )
 
 # Fast simulation (summary only)
@@ -98,7 +120,7 @@ storage_config = sf.StorageConfig(
     output_path="simulation_results.parquet"
 )
 results = portfolio.simulate(
-    n_simulations=100000, 
+    n_simulations=100000,
     storage_config=storage_config
 )
 

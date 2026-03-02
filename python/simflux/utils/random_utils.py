@@ -1,11 +1,11 @@
 """Random number generation utilities and correlation matrix helpers."""
 
 import numpy as np
-from typing import Optional
+from typing import List, Optional
 import random
 
 
-def set_seed(seed: int):
+def set_seed(seed: int) -> None:
     """
     Set random seed for reproducible results across Python and NumPy.
     
@@ -38,17 +38,16 @@ def generate_correlation_matrix(n: int,
     np.ndarray
         Valid correlation matrix (positive definite, symmetric)
     """
-    if random_state is not None:
-        np.random.seed(random_state)
-    
+    rng = np.random.default_rng(random_state)
+
     if not 0 <= correlation_strength <= 1:
         raise ValueError("correlation_strength must be between 0 and 1")
-    
+
     if n < 2:
         raise ValueError("n must be at least 2")
-    
+
     # Generate random matrix
-    A = np.random.normal(0, 1, (n, n))
+    A = rng.normal(0, 1, (n, n))
     
     # Make it symmetric
     A = (A + A.T) / 2
@@ -156,7 +155,7 @@ def ensure_valid_correlation_matrix(matrix: np.ndarray,
     return adjusted
 
 
-def create_block_correlation_matrix(block_sizes: list, 
+def create_block_correlation_matrix(block_sizes: List[int],
                                    intra_block_corr: float,
                                    inter_block_corr: float = 0.0) -> np.ndarray:
     """
@@ -225,6 +224,47 @@ def correlation_from_factor_loadings(factor_loadings: np.ndarray) -> np.ndarray:
 
 
 # Validation functions
+def validate_correlation_matrix_strict(
+    matrix: np.ndarray,
+    name: str = "correlation_matrix",
+    check_positive_definite: bool = True,
+    pd_tolerance: float = 1e-12,
+) -> None:
+    """Validate a correlation matrix, raising ValueError on failure.
+
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Matrix to validate.
+    name : str
+        Label used in error messages.
+    check_positive_definite : bool
+        If True, require strictly positive definite (eigenvalues > pd_tolerance).
+        If False, allow positive semi-definite.
+    pd_tolerance : float
+        Threshold for eigenvalue positivity check.
+    """
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError(f"{name} must be square")
+
+    if not np.allclose(matrix, matrix.T):
+        raise ValueError(f"{name} must be symmetric")
+
+    if not np.allclose(np.diag(matrix), 1.0):
+        raise ValueError(f"{name} diagonal must be 1.0")
+
+    if np.any(np.abs(matrix) > 1.0):
+        raise ValueError(f"{name} values must be between -1 and 1")
+
+    eigenvals = np.linalg.eigvals(matrix)
+    if check_positive_definite:
+        if np.any(eigenvals <= pd_tolerance):
+            raise ValueError(f"{name} must be positive definite")
+    else:
+        if np.any(eigenvals < -pd_tolerance):
+            raise ValueError(f"{name} must be positive semi-definite")
+
+
 def validate_correlation_matrix(matrix: np.ndarray, tolerance: float = 1e-8) -> bool:
     """
     Validate if a matrix is a proper correlation matrix.
