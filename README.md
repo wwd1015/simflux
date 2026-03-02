@@ -56,51 +56,98 @@ maturin develop --release
 
 *See [benchmarks/](benchmarks/) directory for detailed performance analysis.*
 
+## Key Concepts
+
+### Simulation Parameters
+
+All simulators share these common parameters:
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `mu` | **Drift** — annualized expected return (e.g., 0.05 = 5% per year) | `mu=0.05` |
+| `sigma` | **Volatility** — annualized standard deviation of returns (e.g., 0.2 = 20%) | `sigma=0.2` |
+| `S0` | **Initial price** of the asset | `S0=100` |
+| `n_paths` | Number of independent simulation runs (more = better statistics) | `n_paths=1000` |
+| `n_steps` | Number of discrete time steps (controls time grid resolution) | `n_steps=252` |
+| `T` | **Time horizon** in years (e.g., 1.0 = one year, 0.25 = one quarter) | `T=1.0` |
+
+**Why both `n_steps` and `T`?** Because `mu` and `sigma` are in annualized units (industry convention), the simulation needs to know the real time span to scale them correctly. The step size is `dt = T / n_steps`. For example:
+- `T=1.0, n_steps=252` → daily steps over 1 year (`dt ≈ 0.004 years`)
+- `T=1.0, n_steps=12` → monthly steps over 1 year (`dt ≈ 0.083 years`)
+- `T=5.0, n_steps=60` → monthly steps over 5 years
+
+### Correlation Matrix
+
+For multi-asset simulations, you provide a correlation matrix describing how asset returns move together. Values range from -1 (perfectly opposite) to 1 (perfectly together):
+
+```python
+# Two assets with 30% correlation
+correlation_matrix = np.array([
+    [1.0, 0.3],
+    [0.3, 1.0]
+])
+```
+
 ## Quick Start
 
-### Correlated GBM Simulation
+### GBM Simulation
 
 ```python
 import simflux as sf
 import numpy as np
 
-# Single series
+# Single asset: simulate 1000 paths of daily prices over 1 year
 gbm = sf.GBM(mu=0.05, sigma=0.2, S0=100)
 paths = gbm.simulate(n_paths=1000, n_steps=252, T=1.0)
+# paths.shape = (1000, 253) — each row is one price path
 
-# Multiple correlated series
+# Multiple correlated assets
 correlation_matrix = np.array([[1.0, 0.3], [0.3, 1.0]])
 gbm_multi = sf.CorrelatedGBM(
-    mu=[0.05, 0.03],
-    sigma=[0.2, 0.15], 
-    S0=[100, 50],
+    mu=[0.05, 0.03],       # annualized drift per asset
+    sigma=[0.2, 0.15],     # annualized volatility per asset
+    S0=[100, 50],           # starting prices
     correlation_matrix=correlation_matrix
 )
 paths = gbm_multi.simulate(n_paths=1000, n_steps=252, T=1.0)
+# paths.shape = (1000, 2, 253) — 1000 paths, 2 assets, 253 time points
 ```
 
 ### Time-Varying GBM
 
+Use this when drift or volatility changes over time (e.g., a volatility spike mid-year). You provide time-value pairs, and parameters are linearly interpolated between them.
+
 ```python
-# Single asset with time-dependent parameters
+# Volatility spikes from 20% to 30% at the 6-month mark, then settles to 15%
 tv_gbm = sf.TimeVaryingGBM(
-    mu_times=[0, 0.5, 1.0], mu_values=[0.05, 0.08, 0.03],
-    sigma_times=[0, 0.5, 1.0], sigma_values=[0.2, 0.3, 0.15],
+    mu_times=[0, 0.5, 1.0],      # time points (in years)
+    mu_values=[0.05, 0.08, 0.03], # drift at each time point
+    sigma_times=[0, 0.5, 1.0],
+    sigma_values=[0.2, 0.3, 0.15],
     S0=100
 )
 paths = tv_gbm.simulate(n_paths=1000, n_steps=252, T=1.0)
+
+# For constant parameters, a single point is enough (value is held flat)
+tv_gbm_flat = sf.TimeVaryingGBM(
+    mu_times=[0], mu_values=[0.05],
+    sigma_times=[0], sigma_values=[0.2],
+    S0=100
+)
 ```
 
 ### Portfolio Loss Simulation
+
+Simulate credit portfolio losses using a two-factor Merton framework. Each asset can default based on its probability of default (PD), with losses determined by loss given default (LGD).
 
 ```python
 # Quick start with sample portfolio
 portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
     n_assets_per_sector=100,
     sectors=['Technology', 'Finance', 'Healthcare'],
-    intra_sector_correlations=0.4,
-    inter_sector_correlation=0.2,
-    systematic_lgd_correlation=0.3,
+    intra_sector_correlations=0.4,   # how correlated assets are within a sector
+    inter_sector_correlation=0.2,     # how correlated sectors are with each other
+    systematic_lgd_correlation=0.3,   # how loss severity correlates with market stress
 )
 
 # Or build from asset data
@@ -111,10 +158,11 @@ portfolio = sf.TwoFactorPortfolio(
     systematic_lgd_correlation=0.3,
 )
 
-# Fast simulation (summary only)
+# Run 100k Monte Carlo scenarios
 results = portfolio.simulate(n_simulations=100000)
+print(results['portfolio_statistics'])  # mean loss, VaR, expected shortfall, etc.
 
-# Detailed simulation with interim results
+# With interim results saved to disk for detailed analysis
 storage_config = sf.StorageConfig(
     store_interim=True,
     output_path="simulation_results.parquet"
