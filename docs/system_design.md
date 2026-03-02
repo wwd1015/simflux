@@ -15,7 +15,7 @@ SimFlux uses a hybrid Python/Rust architecture:
 │  Public API: GBM, CorrelatedGBM, TimeVaryingGBM │
 │              TwoFactorPortfolio                  │
 ├─────────────────────────────────────────────────┤
-│  Config: SimulationConfig, StorageConfig, AssetData │
+│  Config: SimulationConfig, StorageConfig, AssetData  │
 ├────────────────────┬────────────────────────────┤
 │  SimulationEngine  │  Validation & Utilities     │
 │  (Backend Router)  │  (Correlation, Random, etc.) │
@@ -29,8 +29,8 @@ SimFlux uses a hybrid Python/Rust architecture:
 
 ### core/base.py
 - `BaseSimulator`: Abstract base class defining simulator interface
-- `SimulationConfig`: Thread count, batch size, seed, memory limits
-- `SimulationResults`: Result container (partially implemented)
+- `SimulationConfig`: Seed, memory limits, reserved thread/batch settings
+- `SimulationResults`: Result container with lazy `load_interim_data()` via `ParquetResultsAnalyzer`
 
 ### core/engine.py
 - `SimulationEngine`: Routes simulation calls to Rust or NumPy
@@ -64,6 +64,7 @@ SimFlux uses a hybrid Python/Rust architecture:
 - `ParquetResultsAnalyzer`: Lazy Polars-based analysis of simulation results
 
 ### utils/random_utils.py
+- `set_seed()`: Set global random seed for reproducibility (legacy API, also exported at top level)
 - Correlation matrix generation, validation, and correction
 - Block correlation matrices, factor-based correlation
 
@@ -105,14 +106,8 @@ Portfolio loss = Σ loss_i
 
 ## 5. Known Issues & Technical Debt
 
-### Duplication
-- `StorageConfig` defined in both `core/base.py` and `utils/storage.py`
-- Correlation validation logic duplicated across 3+ locations
-
 ### Incomplete Features
-- `SimulationResults.load_interim_data()` returns placeholder `{}`
-- `memory_limit_gb` config parameter not enforced
-- `n_threads` and `batch_size` config parameters not utilized
+- `n_threads` and `batch_size` config parameters not utilized (reserved for future use)
 - HDF5 storage format accepted in config but not implemented
 
 ### Edge Cases

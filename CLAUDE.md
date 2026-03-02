@@ -54,5 +54,5 @@ User API → Simulator class → validate_inputs() → SimulationEngine
 - Tests use unittest.mock to mock Rust availability
 
 ## Dependencies
-- Python: numpy>=2.2, pandas>=3.0, polars>=1.38, pyarrow>=25.0, scipy (optional)
+- Python: numpy>=2.2, pandas>=3.0, polars>=1.38, pyarrow>=18.0, scipy (optional)
 - Rust: pyo3, ndarray, nalgebra, statrs, rayon, arrow, parquet
