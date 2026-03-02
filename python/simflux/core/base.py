@@ -1,90 +1,98 @@
 """Base classes and configurations for simulation components."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, Union
-import numpy as np
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
 
 
 @dataclass
 class SimulationConfig:
     """Configuration for simulation runs."""
-    
+
     seed: Optional[int] = None
-    n_threads: Optional[int] = None
-    batch_size: int = 10000
+    n_threads: Optional[int] = None  # Reserved for future multi-threading support
+    batch_size: int = 10000  # Reserved for future batched simulation support
     memory_limit_gb: Optional[float] = None
     progress_callback: Optional[callable] = None
 
 
-@dataclass 
-class StorageConfig:
-    """Configuration for interim results storage."""
-    
-    store_interim: bool = False
-    store_defaults: bool = True
-    store_losses: bool = True
-    store_systematic_factors: bool = False
-    format: str = "parquet"  # "parquet" or "hdf5"
-    output_path: Optional[str] = None
-    partition_by: Optional[list] = field(default_factory=lambda: ["sector"])
-    compression: str = "snappy"  # "snappy", "gzip", "lz4", "zstd"
-    batch_size: int = 10000
-
-
 class BaseSimulator(ABC):
     """Abstract base class for all simulators."""
-    
-    def __init__(self, config: Optional[SimulationConfig] = None):
+
+    def __init__(self, config: Optional[SimulationConfig] = None) -> None:
         self.config = config or SimulationConfig()
         self._validate_config()
-    
-    def _validate_config(self):
+
+    def _validate_config(self) -> None:
         """Validate simulation configuration."""
         if self.config.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        
+
         if self.config.memory_limit_gb is not None and self.config.memory_limit_gb <= 0:
             raise ValueError("memory_limit_gb must be positive")
-    
+
+    def _check_memory(self, n_elements: int, element_bytes: int = 8) -> None:
+        """Check if estimated memory usage exceeds configured limit.
+
+        Parameters
+        ----------
+        n_elements : int
+            Total number of array elements to allocate.
+        element_bytes : int
+            Bytes per element (default 8 for float64).
+
+        Raises
+        ------
+        MemoryError
+            If estimated memory exceeds ``memory_limit_gb``.
+        """
+        if self.config.memory_limit_gb is None:
+            return
+        estimated_gb = (n_elements * element_bytes) / (1024 ** 3)
+        if estimated_gb > self.config.memory_limit_gb:
+            raise MemoryError(
+                f"Estimated memory usage ({estimated_gb:.2f} GB) exceeds limit "
+                f"({self.config.memory_limit_gb:.2f} GB). Reduce n_paths/n_steps or "
+                f"increase memory_limit_gb."
+            )
+
     @abstractmethod
-    def simulate(self, *args, **kwargs):
+    def simulate(self, *args: Any, **kwargs: Any) -> Any:
         """Run simulation. To be implemented by subclasses."""
         pass
-    
+
     @abstractmethod
-    def validate_inputs(self, *args, **kwargs):
+    def validate_inputs(self, *args: Any, **kwargs: Any) -> None:
         """Validate simulation inputs. To be implemented by subclasses."""
         pass
 
 
 class SimulationResults:
     """Container for simulation results with lazy loading capabilities."""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  summary_stats: Dict[str, Any],
-                 interim_data_path: Optional[str] = None):
+                 interim_data_path: Optional[str] = None) -> None:
         self.summary_stats = summary_stats
         self.interim_data_path = interim_data_path
-        self._interim_data = None
-    
+        self._interim_data: Optional[Any] = None
+
     @property
     def has_interim_data(self) -> bool:
         """Check if interim data is available."""
         return self.interim_data_path is not None
-    
+
     def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics."""
         return self.summary_stats
-    
-    def load_interim_data(self):
-        """Load interim data on demand."""
+
+    def load_interim_data(self) -> Any:
+        """Load interim data on demand via ParquetResultsAnalyzer."""
         if not self.has_interim_data:
             raise ValueError("No interim data available")
-        
+
         if self._interim_data is None:
-            # Lazy loading implementation would go here
-            # For now, return placeholder
-            self._interim_data = {}
-        
+            from ..utils.storage import ParquetResultsAnalyzer
+            self._interim_data = ParquetResultsAnalyzer(self.interim_data_path)
+
         return self._interim_data

@@ -4,6 +4,7 @@ import numpy as np
 from typing import Optional, List, Union
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.engine import SimulationEngine
+from ..utils.random_utils import validate_correlation_matrix_strict
 
 
 class GBM(BaseSimulator):
@@ -167,31 +168,23 @@ class CorrelatedGBM(BaseSimulator):
     def validate_inputs(self, mu, sigma, S0, correlation_matrix):
         """Validate correlated GBM parameters."""
         n_assets = len(mu)
-        
+
         if len(sigma) != n_assets:
             raise ValueError("sigma must have same length as mu")
         if len(S0) != n_assets:
             raise ValueError("S0 must have same length as mu")
-        
+
         if correlation_matrix.shape != (n_assets, n_assets):
             raise ValueError(f"correlation_matrix must be {n_assets}x{n_assets}")
-        
+
         # Validate individual parameters
         for i, (m, s, s0) in enumerate(zip(mu, sigma, S0)):
             if s <= 0:
                 raise ValueError(f"sigma[{i}] must be positive")
             if s0 <= 0:
                 raise ValueError(f"S0[{i}] must be positive")
-        
-        # Validate correlation matrix
-        if not np.allclose(correlation_matrix, correlation_matrix.T):
-            raise ValueError("correlation_matrix must be symmetric")
-        
-        if not np.allclose(np.diag(correlation_matrix), 1.0):
-            raise ValueError("correlation_matrix diagonal must be 1.0")
-        
-        if np.any(np.abs(correlation_matrix) > 1.0):
-            raise ValueError("correlation_matrix values must be between -1 and 1")
+
+        validate_correlation_matrix_strict(correlation_matrix)
     
     def simulate(self,
                  n_paths: int,

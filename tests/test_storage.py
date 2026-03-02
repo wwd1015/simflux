@@ -77,27 +77,28 @@ class TestStorageIntegration:
     def test_parquet_results_analyzer(self):
         """Test ParquetResultsAnalyzer functionality."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Create a dummy parquet file path
+            # Create a dummy parquet file so the analyzer can open it
             parquet_path = os.path.join(temp_dir, "test_results.parquet")
 
-            # Try to create analyzer
-            try:
-                analyzer = sf.ParquetResultsAnalyzer(parquet_path)
+            # Non-existent path should raise FileNotFoundError
+            with pytest.raises(FileNotFoundError):
+                sf.ParquetResultsAnalyzer(parquet_path)
 
-                # Basic properties should be accessible
-                assert hasattr(analyzer, 'file_path')
-                assert analyzer.file_path == parquet_path
+            # Create a minimal parquet file for a successful init
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            table = pa.table({"trial_id": [1], "asset_id": [1]})
+            pq.write_table(table, parquet_path)
 
-                # Methods should exist even if they fail on missing file
-                assert hasattr(analyzer, 'query_high_loss_trials')
-                assert hasattr(analyzer, 'analyze_by_sector')
+            analyzer = sf.ParquetResultsAnalyzer(parquet_path)
 
-            except Exception as e:
-                # Might fail if storage backend not implemented
-                if "not available" in str(e).lower():
-                    pytest.skip("Storage analyzer not available")
-                else:
-                    raise
+            # Basic properties should be accessible
+            assert hasattr(analyzer, 'path')
+            assert analyzer.path == parquet_path
+
+            # Methods should exist
+            assert hasattr(analyzer, 'query_high_loss_trials')
+            assert hasattr(analyzer, 'analyze_by_sector')
 
     def test_storage_config_validation(self):
         """Test storage configuration validation."""
@@ -115,6 +116,8 @@ class TestStorageIntegration:
 
     def test_storage_memory_efficiency(self):
         """Test that storage doesn't dramatically increase memory usage."""
+        pytest.importorskip("psutil")
+
         # Create a portfolio simulation without storage
         portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
             n_assets_per_sector=[5, 5],

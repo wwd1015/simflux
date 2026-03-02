@@ -81,7 +81,7 @@ class TestRandomUtils:
         assert validate_correlation_matrix(valid_matrix)
         
         # Non-square matrix
-        invalid_matrix = np.array([[1.0, 0.3, 0.2], [0.3, 1.0]])
+        invalid_matrix = np.array([[1.0, 0.3, 0.2], [0.3, 1.0, 0.1]])
         assert not validate_correlation_matrix(invalid_matrix)
         
         # Non-symmetric matrix

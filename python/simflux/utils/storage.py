@@ -23,7 +23,7 @@ class StorageConfig:
     compression: str = "snappy"
     batch_size: int = 10000
     
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.partition_by is None:
             self.partition_by = ["sector"] if self.store_interim else []
         
@@ -52,7 +52,7 @@ class ParquetResultsAnalyzer:
         self._validate_path()
         self._lazy_frame = None
     
-    def _validate_path(self):
+    def _validate_path(self) -> None:
         """Validate that the Parquet path exists and is readable."""
         path = Path(self.path)
         if not path.exists():
@@ -83,8 +83,8 @@ class ParquetResultsAnalyzer:
                 .collect()
                 .item())
     
-    def get_defaults(self, 
-                     trial_range: Optional[tuple] = None,
+    def get_defaults(self,
+                     trial_range: Optional[tuple[int, int]] = None,
                      sectors: Optional[List[str]] = None,
                      asset_ids: Optional[List[int]] = None) -> pl.DataFrame:
         """
@@ -290,7 +290,7 @@ class ParquetResultsAnalyzer:
         
         return query.collect().to_pandas()
     
-    def close(self):
+    def close(self) -> None:
         """Clean up resources."""
         self._lazy_frame = None
 

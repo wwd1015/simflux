@@ -205,8 +205,8 @@ class TestTwoFactorPortfolio:
         """Test portfolio with invalid correlation parameters."""
         assets = self.create_sample_assets()
         
-        # Invalid sector correlation matrix (not PSD)
-        with pytest.raises(ValueError, match="sector_correlation_matrix must be positive semi-definite"):
+        # Invalid sector correlation matrix (values out of range)
+        with pytest.raises(ValueError, match="sector_correlation_matrix values must be between -1 and 1"):
             sf.TwoFactorPortfolio(assets=assets, sector_correlation_matrix=[[1.0, 1.5], [1.5, 1.0]])
 
         # Invalid systematic LGD correlation
@@ -367,7 +367,7 @@ class TestStorageConfig:
         assert config.store_systematic_factors is False
         assert config.format == "parquet"
         assert config.output_path is None
-        assert config.partition_by == ["sector"]
+        assert config.partition_by == []
         assert config.compression == "snappy"
         assert config.batch_size == 10000
     

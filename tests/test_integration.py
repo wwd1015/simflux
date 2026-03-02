@@ -210,15 +210,15 @@ class TestIntegrationWorkflows:
         actual_finals = paths_low_vol[:, -1]
         assert np.abs(np.mean(actual_finals) - expected_final) < 1.0
 
-        # Perfect correlation
-        perfect_corr = sf.CorrelatedGBM(
+        # Near-perfect correlation (1.0 exactly is singular, not positive definite)
+        near_perfect_corr = sf.CorrelatedGBM(
             mu=[0.05, 0.03],
             sigma=[0.2, 0.15],
             S0=[100, 50],
-            correlation_matrix=[[1.0, 1.0], [1.0, 1.0]]
+            correlation_matrix=[[1.0, 0.999], [0.999, 1.0]]
         )
 
-        paths_perfect = perfect_corr.simulate(n_paths=500, n_steps=50, T=0.25)
+        paths_perfect = near_perfect_corr.simulate(n_paths=500, n_steps=50, T=0.25)
 
         # Returns should be highly correlated
         returns_1 = (paths_perfect[:, 0, -1] / paths_perfect[:, 0, 0]) - 1

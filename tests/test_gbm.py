@@ -32,17 +32,17 @@ class TestGBM:
         with pytest.raises(ValueError, match="S0 must be positive"):
             sf.GBM(mu=0.05, sigma=0.2, S0=-100)
     
-    @patch('simflux.processes.gbm.RUST_AVAILABLE', True)
-    @patch('simflux.processes.gbm._rust')
+    @patch('simflux.core.engine.RUST_AVAILABLE', True)
+    @patch('simflux.core.engine._rust')
     def test_gbm_simulate(self, mock_rust):
         """Test GBM simulation with mocked Rust backend."""
         # Mock the Rust simulate_gbm function
         mock_paths = [[100.0, 105.0, 110.0], [100.0, 95.0, 98.0]]
         mock_rust.simulate_gbm.return_value = mock_paths
-        
+
         gbm = sf.GBM(mu=0.05, sigma=0.2, S0=100)
         paths = gbm.simulate(n_paths=2, n_steps=2, T=1.0)
-        
+
         # Check that Rust function was called with correct parameters
         mock_rust.simulate_gbm.assert_called_once()
         call_args = mock_rust.simulate_gbm.call_args[1]
@@ -51,7 +51,7 @@ class TestGBM:
         assert call_args['s0'] == 100.0
         assert call_args['n_paths'] == 2
         assert call_args['n_steps'] == 2
-        
+
         # Check output shape and values
         assert paths.shape == (2, 3)
         assert paths[0, 0] == 100.0
@@ -73,8 +73,8 @@ class TestGBM:
         with pytest.raises(ValueError, match="T must be positive"):
             gbm.simulate(n_paths=100, n_steps=252, T=0)
     
-    @patch('simflux.processes.gbm.RUST_AVAILABLE', True)
-    @patch('simflux.processes.gbm._rust')
+    @patch('simflux.core.engine.RUST_AVAILABLE', True)
+    @patch('simflux.core.engine._rust')
     def test_gbm_single_path(self, mock_rust):
         """Test single path simulation."""
         mock_paths = [[100.0, 105.0, 110.0]]
@@ -167,8 +167,8 @@ class TestCorrelatedGBM:
                 correlation_matrix=[[1.0, 1.5], [1.5, 1.0]]  # Value > 1
             )
     
-    @patch('simflux.processes.gbm.RUST_AVAILABLE', True)
-    @patch('simflux.processes.gbm._rust')
+    @patch('simflux.core.engine.RUST_AVAILABLE', True)
+    @patch('simflux.core.engine._rust')
     def test_correlated_gbm_simulate(self, mock_rust):
         """Test correlated GBM simulation."""
         # Mock return: paths[trial][asset][time_step]
