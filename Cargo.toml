@@ -24,3 +24,6 @@ parquet = "54.0"
 [dependencies.pyo3-polars]
 version = "0.20"
 features = ["lazy"]
+
+[dev-dependencies]
+tempfile = "3"

@@ -17,7 +17,7 @@ make build                   # Build release
 ### Module Layout
 ```
 python/simflux/
-  core/       - BaseSimulator (ABC), SimulationEngine (Rust/NumPy backend), SimulationConfig
+  core/       - Backend (registry), SimulationEngine (Rust/NumPy dispatcher), BaseSimulator (ABC), SimulationConfig
   processes/  - GBM, CorrelatedGBM, TimeVaryingGBM, TimeVaryingCorrelatedGBM
   portfolio/  - TwoFactorPortfolio, AssetData, TwoFactorCorrelationStructure
   utils/      - ParquetResultsAnalyzer, StorageConfig, random/correlation utilities
@@ -25,7 +25,7 @@ src/          - Rust backend (gbm.rs, portfolio.rs, correlation.rs, storage.rs)
 ```
 
 ### Key Design Patterns
-- **Strategy**: SimulationEngine selects Rust or NumPy backend via `RUST_AVAILABLE` flag
+- **Strategy**: Backend class (centralized registry) selects Rust or NumPy backend via `Backend.is_available()`
 - **Template Method**: BaseSimulator defines validation framework, subclasses specialize
 - **Factory**: `AssetData.from_dataframe()`, `TwoFactorPortfolio.create_sample_portfolio()`
 - **Lazy Loading**: ParquetResultsAnalyzer uses Polars lazy frames
@@ -33,25 +33,32 @@ src/          - Rust backend (gbm.rs, portfolio.rs, correlation.rs, storage.rs)
 ### Class Hierarchy
 ```
 BaseSimulator (ABC)
-├── GBM                         # Single-asset GBM
-├── CorrelatedGBM               # Multi-asset with correlation matrix
-├── TimeVaryingGBM              # Time-varying mu/sigma
-├── TimeVaryingCorrelatedGBM    # Multi-asset time-varying
-└── TwoFactorPortfolio          # Credit portfolio (Merton framework)
+├── GBM                         # Single-asset GBM (Rust: simulate_gbm)
+├── CorrelatedGBM               # Multi-asset with correlation matrix (Rust: simulate_gbm_multi)
+├── TimeVaryingGBM              # Time-varying mu/sigma (Rust: simulate_gbm_tv)
+├── TimeVaryingCorrelatedGBM    # Multi-asset time-varying (Rust: simulate_gbm_tv_multi)
+└── TwoFactorPortfolio          # Credit portfolio (Rust: simulate_portfolio)
+
+SimulationEngine                # NOT a BaseSimulator — standalone backend dispatcher
 ```
 
 ### Data Flow
 ```
 User API → Simulator class → validate_inputs() → SimulationEngine
-  → Rust backend (fast) OR NumPy fallback → Results (ndarray or dict)
+  → Backend.is_available() → Rust backend (fast) OR NumPy fallback → Results (ndarray or dict)
 ```
 
 ## Code Conventions
 - Python 3.12+ required
 - Dataclasses for configuration (SimulationConfig, StorageConfig, AssetData)
 - Correlation matrices validated: symmetric, diagonal=1, values in [-1,1], positive definite
-- All simulators inherit from BaseSimulator
-- Tests use unittest.mock to mock Rust availability
+- All simulators inherit from BaseSimulator; SimulationEngine does NOT
+- Use `Backend.is_available()` / `Backend.get_rust()` for Rust detection — never module-level flags
+- `CORRELATION_TOLERANCE = 1e-8` shared constant for all validation (in `core/backend.py`)
+- Tests mock via `@patch.object(Backend, 'is_available', ...)` and `@patch.object(Backend, 'get_rust')`
+
+## Dual-Implementation & Cross-Validation
+Every simulation type has both a Rust and NumPy implementation. Cross-validation tests in `tests/test_cross_validation.py` run both backends on the same problem and compare distributional statistics. This strategy catches bugs in either backend and ensures the NumPy fallback remains a reliable failsafe.
 
 ## Dependencies
 - Python: numpy>=2.2, pandas>=3.0, polars>=1.38, pyarrow>=18.0, scipy (optional)

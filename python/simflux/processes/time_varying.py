@@ -2,12 +2,15 @@
 Time-varying parameter support for stochastic processes.
 
 This module provides simple time-varying GBM by accepting time series inputs directly.
+When the Rust backend is available the heavy lifting is delegated there; otherwise a
+vectorised NumPy fallback is used transparently.
 """
 
 import numpy as np
-from typing import Union, List, Optional, Tuple
+from typing import Any, Union, List, Optional, Tuple
 
 from ..core.base import BaseSimulator, SimulationConfig
+from ..core.engine import SimulationEngine
 
 
 def _linear_interpolate(t: float, times: np.ndarray, values: np.ndarray) -> float:
@@ -35,20 +38,16 @@ class TimeVaryingGBM(BaseSimulator):
         self.sigma_times = np.asarray(sigma_times)
         self.sigma_values = np.asarray(sigma_values)
         self.S0 = S0
+        self.engine = SimulationEngine(config)
 
         if len(self.mu_times) != len(self.mu_values):
             raise ValueError("mu_times and mu_values must have same length")
         if len(self.sigma_times) != len(self.sigma_values):
             raise ValueError("sigma_times and sigma_values must have same length")
 
-    def validate_inputs(self, n_paths: int, n_steps: int, T: float) -> None:
-        """Validate simulation inputs."""
-        if n_paths <= 0:
-            raise ValueError("n_paths must be positive")
-        if n_steps <= 0:
-            raise ValueError("n_steps must be positive")
-        if T <= 0:
-            raise ValueError("T must be positive")
+    def validate_inputs(self, *args: Any, **kwargs: Any) -> None:
+        """Construction-time validation only; simulation dims validated by engine."""
+        pass
 
     def get_parameters_at_time(self, t: float) -> Tuple[float, float]:
         """Get mu and sigma values at time t."""
@@ -63,8 +62,8 @@ class TimeVaryingGBM(BaseSimulator):
         """
         Simulate time-varying GBM paths.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         n_paths : int
             Number of simulation paths
         n_steps : int
@@ -72,31 +71,21 @@ class TimeVaryingGBM(BaseSimulator):
         T : float
             Time horizon
 
-        Returns:
-        --------
+        Returns
+        -------
         np.ndarray
             Simulated paths of shape (n_paths, n_steps + 1)
         """
-        self.validate_inputs(n_paths, n_steps, T)
-        self._check_memory(n_paths * (n_steps + 1))
-
-        dt = T / n_steps
-        times = np.linspace(0, T, n_steps + 1)
-
-        paths = np.zeros((n_paths, n_steps + 1))
-        paths[:, 0] = self.S0
-
-        rng = np.random.default_rng(self.config.seed if self.config else None)
-        dW = rng.normal(0, np.sqrt(dt), (n_paths, n_steps))
-
-        for i in range(n_steps):
-            t = times[i]
-            mu, sigma = self.get_parameters_at_time(t)
-            paths[:, i+1] = paths[:, i] * np.exp(
-                (mu - 0.5 * sigma**2) * dt + sigma * dW[:, i]
-            )
-
-        return paths
+        return self.engine.simulate_gbm_time_varying(
+            mu_times=self.mu_times.tolist(),
+            mu_values=self.mu_values.tolist(),
+            sigma_times=self.sigma_times.tolist(),
+            sigma_values=self.sigma_values.tolist(),
+            s0=self.S0,
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+        )
 
 
 class TimeVaryingCorrelatedGBM(BaseSimulator):
@@ -118,6 +107,7 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
         self.n_assets = len(S0)
         self.S0 = np.asarray(S0)
         self.correlation_matrix = correlation_matrix
+        self.engine = SimulationEngine(config)
 
         self.mu_times = [np.asarray(times) for times in mu_times]
         self.mu_values = [np.asarray(values) for values in mu_values]
@@ -129,16 +119,12 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
         if len(self.sigma_times) != self.n_assets:
             raise ValueError("Must provide sigma time series for each asset")
 
-        self.chol = np.linalg.cholesky(correlation_matrix)
+        # Validate Cholesky feasibility (actual decomposition done in engine)
+        np.linalg.cholesky(correlation_matrix)
 
-    def validate_inputs(self, n_paths: int, n_steps: int, T: float) -> None:
-        """Validate simulation inputs."""
-        if n_paths <= 0:
-            raise ValueError("n_paths must be positive")
-        if n_steps <= 0:
-            raise ValueError("n_steps must be positive")
-        if T <= 0:
-            raise ValueError("T must be positive")
+    def validate_inputs(self, *args: Any, **kwargs: Any) -> None:
+        """Construction-time validation only; simulation dims validated by engine."""
+        pass
 
     def get_parameters_at_time(self, t: float) -> Tuple[np.ndarray, np.ndarray]:
         """Get mu and sigma vectors at time t."""
@@ -159,31 +145,21 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
         """
         Simulate multi-asset time-varying GBM paths.
 
-        Returns:
-        --------
+        Returns
+        -------
         np.ndarray
             Simulated paths of shape (n_paths, n_assets, n_steps + 1)
         """
         self.validate_inputs(n_paths, n_steps, T)
-        self._check_memory(n_paths * self.n_assets * (n_steps + 1))
 
-        dt = T / n_steps
-        times = np.linspace(0, T, n_steps + 1)
-
-        paths = np.zeros((n_paths, self.n_assets, n_steps + 1))
-        paths[:, :, 0] = self.S0
-
-        rng = np.random.default_rng(self.config.seed if self.config else None)
-
-        for i in range(n_steps):
-            t = times[i]
-            mu, sigma = self.get_parameters_at_time(t)
-
-            dW = rng.normal(0, np.sqrt(dt), (n_paths, self.n_assets))
-            dW_corr = dW @ self.chol.T
-
-            paths[:, :, i+1] = paths[:, :, i] * np.exp(
-                (mu - 0.5 * sigma**2) * dt + sigma * dW_corr
-            )
-
-        return paths
+        return self.engine.simulate_gbm_time_varying_correlated(
+            mu_times=[t.tolist() for t in self.mu_times],
+            mu_values=[v.tolist() for v in self.mu_values],
+            sigma_times=[t.tolist() for t in self.sigma_times],
+            sigma_values=[v.tolist() for v in self.sigma_values],
+            s0=self.S0.tolist(),
+            correlation_matrix=self.correlation_matrix,
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+        )

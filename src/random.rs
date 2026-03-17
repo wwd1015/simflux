@@ -15,9 +15,10 @@ pub fn sample_standard_normal(rng: &mut StdRng) -> f64 {
     rng.sample(StandardNormal)
 }
 
-pub fn sample_normal(rng: &mut StdRng, mean: f64, std: f64) -> f64 {
-    let normal = Normal::new(mean, std).unwrap();
-    rng.sample(normal)
+pub fn sample_normal(rng: &mut StdRng, mean: f64, std: f64) -> Result<f64, String> {
+    let normal = Normal::new(mean, std)
+        .map_err(|e| format!("Invalid normal distribution parameters: {}", e))?;
+    Ok(rng.sample(normal))
 }
 
 pub fn generate_independent_normals(n: usize, seed: Option<u64>) -> Vec<f64> {

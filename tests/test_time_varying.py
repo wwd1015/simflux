@@ -8,6 +8,8 @@ import os
 # Add the python directory to the path for testing
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
 
+from unittest.mock import patch, MagicMock
+import simflux as sf
 from simflux.processes.time_varying import (
     TimeVaryingGBM,
     TimeVaryingCorrelatedGBM
@@ -57,7 +59,6 @@ class TestTimeVaryingGBM:
             S0=100
         )
 
-        # Endpoints
         mu, sigma = gbm.get_parameters_at_time(0.0)
         assert mu == pytest.approx(0.04)
         assert sigma == pytest.approx(0.20)
@@ -66,7 +67,6 @@ class TestTimeVaryingGBM:
         assert mu == pytest.approx(0.08)
         assert sigma == pytest.approx(0.30)
 
-        # Midpoint (linear interpolation)
         mu, sigma = gbm.get_parameters_at_time(0.5)
         assert mu == pytest.approx(0.06)
         assert sigma == pytest.approx(0.25)
@@ -81,12 +81,10 @@ class TestTimeVaryingGBM:
             S0=100
         )
 
-        # Before first time point
         mu, sigma = gbm.get_parameters_at_time(0.0)
         assert mu == pytest.approx(0.04)
         assert sigma == pytest.approx(0.20)
 
-        # After last time point
         mu, sigma = gbm.get_parameters_at_time(5.0)
         assert mu == pytest.approx(0.08)
         assert sigma == pytest.approx(0.30)
@@ -101,12 +99,10 @@ class TestTimeVaryingGBM:
             S0=100
         )
 
-        # At breakpoints
         mu, sigma = gbm.get_parameters_at_time(0.25)
         assert mu == pytest.approx(-0.15)
         assert sigma == pytest.approx(0.45)
 
-        # Between breakpoints (linear interp)
         mu, sigma = gbm.get_parameters_at_time(0.5)
         assert mu == pytest.approx((-0.15 + 0.12) / 2)
         assert sigma == pytest.approx((0.45 + 0.25) / 2)
@@ -218,13 +214,13 @@ class TestTimeVaryingCorrelatedGBM:
         returns_1 = paths[:, 1, -1] / paths[:, 1, 0] - 1
         realized = np.corrcoef(returns_0, returns_1)[0, 1]
 
-        assert abs(realized - target_corr) < 0.1  # Within 0.1 of target
+        assert abs(realized - target_corr) < 0.1
 
     def test_validation_mismatched_assets(self):
         """Must provide time series for each asset."""
         with pytest.raises(ValueError, match="Must provide mu time series for each asset"):
             TimeVaryingCorrelatedGBM(
-                mu_times=[[0.0, 1.0]],  # Only 1, need 2
+                mu_times=[[0.0, 1.0]],
                 mu_values=[[0.05, 0.05]],
                 sigma_times=[[0.0, 1.0], [0.0, 1.0]],
                 sigma_values=[[0.2, 0.2], [0.15, 0.15]],
@@ -283,7 +279,6 @@ class TestRealWorldScenarios:
         assert paths.shape == (50, 1261)
         assert np.all(paths > 0)
 
-        # Verify cyclical parameters at start and end (full cycle)
         mu_start, sigma_start = gbm.get_parameters_at_time(0.0)
         mu_end, sigma_end = gbm.get_parameters_at_time(5.0)
         assert mu_start == pytest.approx(mu_end, abs=0.01)

@@ -19,6 +19,7 @@ from .portfolio.correlation import TwoFactorCorrelationStructure
 from .utils.storage import StorageConfig, ParquetResultsAnalyzer
 from .utils.random_utils import set_seed
 from .core.engine import SimulationEngine
+from .core.backend import Backend
 
 __version__ = "0.1.0"
 __author__ = "SimFlux Contributors"

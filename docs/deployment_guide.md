@@ -213,11 +213,11 @@ def test_simflux_installation():
         
         # Detect backend
         try:
-            from simflux.core.engine import RUST_AVAILABLE
-            backend = "Rust" if RUST_AVAILABLE else "NumPy Fallback"
+            from simflux.core.backend import Backend
+            backend = "Rust" if Backend.is_available() else "NumPy Fallback"
             print(f"Backend detected: {backend}")
-            
-            if RUST_AVAILABLE:
+
+            if Backend.is_available():
                 print("🚀 High-performance Rust backend available")
             else:
                 print("⚠️  Using NumPy fallback (slower but functional)")

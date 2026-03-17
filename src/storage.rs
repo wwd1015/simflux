@@ -1,16 +1,15 @@
 use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
-use parquet::file::writer::{FileWriter, SerializedFileWriter};
+use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::fs::File;
-use std::path::Path;
 use std::sync::Arc;
-use crate::portfolio::{TrialResult, AssetSimulationResult};
+use crate::portfolio::TrialResult;
 
 pub struct ParquetStorage {
     schema: SchemaRef,
-    writer: Option<SerializedFileWriter<File>>,
+    writer: Option<ArrowWriter<File>>,
     batch_buffer: Vec<AssetRecord>,
     batch_size: usize,
     output_path: String,
@@ -37,7 +36,7 @@ pub struct AssetRecord {
 impl ParquetStorage {
     pub fn new(output_path: &str, batch_size: usize) -> Result<Self, Box<dyn std::error::Error>> {
         let schema = create_parquet_schema();
-        
+
         Ok(ParquetStorage {
             schema,
             writer: None,
@@ -46,23 +45,21 @@ impl ParquetStorage {
             output_path: output_path.to_string(),
         })
     }
-    
+
     pub fn initialize_writer(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let file = File::create(&self.output_path)?;
-        
-        // Configure writer properties
+
         let props = WriterProperties::builder()
             .set_compression(parquet::basic::Compression::SNAPPY)
-            .set_write_batch_size(self.batch_size)
             .build();
-        
-        let writer = SerializedFileWriter::new(file, self.schema.clone(), Some(props))?;
+
+        let writer = ArrowWriter::try_new(file, self.schema.clone(), Some(props))?;
         self.writer = Some(writer);
-        
+
         Ok(())
     }
-    
-    pub fn add_trial_results(&mut self, 
+
+    pub fn add_trial_results(&mut self,
                            trial_results: &[TrialResult],
                            sector_names: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         for trial in trial_results {
@@ -84,114 +81,105 @@ impl ParquetStorage {
                     lgd_mean: asset_result.lgd_mean as f32,
                     exposure: asset_result.exposure as f32,
                 };
-                
+
                 self.batch_buffer.push(record);
-                
-                // Write batch if buffer is full
+
                 if self.batch_buffer.len() >= self.batch_size {
                     self.write_batch()?;
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     pub fn finalize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Write any remaining records in buffer
         if !self.batch_buffer.is_empty() {
             self.write_batch()?;
         }
-        
-        // Close writer
+
         if let Some(writer) = self.writer.take() {
             writer.close()?;
         }
-        
+
         Ok(())
     }
-    
+
     fn write_batch(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.batch_buffer.is_empty() {
             return Ok(());
         }
-        
+
         let batch = self.create_record_batch()?;
-        
+
+        if self.writer.is_none() {
+            self.initialize_writer()?;
+        }
         if let Some(writer) = &mut self.writer {
             writer.write(&batch)?;
-        } else {
-            self.initialize_writer()?;
-            if let Some(writer) = &mut self.writer {
-                writer.write(&batch)?;
-            }
         }
-        
+
         self.batch_buffer.clear();
         Ok(())
     }
-    
+
     fn create_record_batch(&self) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let len = self.batch_buffer.len();
-        
-        // Create arrays for each column
         let trial_ids = Int64Array::from(
             self.batch_buffer.iter().map(|r| r.trial_id).collect::<Vec<_>>()
         );
-        
+
         let asset_ids = Int32Array::from(
             self.batch_buffer.iter().map(|r| r.asset_id).collect::<Vec<_>>()
         );
-        
+
         let sector_ids = Int32Array::from(
             self.batch_buffer.iter().map(|r| r.sector_id).collect::<Vec<_>>()
         );
-        
+
         let sector_names = StringArray::from(
             self.batch_buffer.iter().map(|r| r.sector_name.as_str()).collect::<Vec<_>>()
         );
-        
+
         let defaulted = BooleanArray::from(
             self.batch_buffer.iter().map(|r| r.defaulted).collect::<Vec<_>>()
         );
-        
+
         let time_to_default = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.time_to_default).collect::<Vec<_>>()
         );
-        
+
         let loss_amounts = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.loss_amount).collect::<Vec<_>>()
         );
-        
+
         let recovery_rates = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.recovery_rate).collect::<Vec<_>>()
         );
-        
+
         let asset_values = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.asset_value).collect::<Vec<_>>()
         );
-        
+
         let sys_factor_global = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.systematic_factor_global).collect::<Vec<_>>()
         );
-        
+
         let sys_factor_sector = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.systematic_factor_sector).collect::<Vec<_>>()
         );
-        
+
         let pds = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.pd).collect::<Vec<_>>()
         );
-        
+
         let lgd_means = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.lgd_mean).collect::<Vec<_>>()
         );
-        
+
         let exposures = Float32Array::from(
             self.batch_buffer.iter().map(|r| r.exposure).collect::<Vec<_>>()
         );
-        
-        // Create record batch
+
         let batch = RecordBatch::try_new(
             self.schema.clone(),
             vec![
@@ -211,7 +199,7 @@ impl ParquetStorage {
                 Arc::new(exposures),
             ],
         )?;
-        
+
         Ok(batch)
     }
 }
@@ -250,25 +238,11 @@ pub fn write_simulation_results_to_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::portfolio::{TrialResult, AssetSimulationResult};
-    use crate::correlation::SystematicFactors;
-    use tempfile::tempdir;
-    
-    #[test]
-    fn test_parquet_storage_creation() {
-        let dir = tempdir().unwrap();
-        let file_path = dir.path().join("test.parquet");
-        let file_path_str = file_path.to_str().unwrap();
-        
-        let storage = ParquetStorage::new(file_path_str, 1000);
-        assert!(storage.is_ok());
-    }
-    
+
     #[test]
     fn test_create_record_batch() {
         let mut storage = ParquetStorage::new("test.parquet", 1000).unwrap();
-        
-        // Add a test record
+
         storage.batch_buffer.push(AssetRecord {
             trial_id: 0,
             asset_id: 1,
@@ -285,10 +259,10 @@ mod tests {
             lgd_mean: 0.6,
             exposure: 10000.0,
         });
-        
+
         let batch = storage.create_record_batch();
         assert!(batch.is_ok());
-        
+
         let batch = batch.unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 14);

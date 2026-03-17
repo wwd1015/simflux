@@ -1,25 +1,35 @@
-"""Main simulation engine orchestrating Rust backend calls."""
+"""Simulation backend dispatching Rust and NumPy implementations."""
 
 import numpy as np
-from typing import Optional, Dict, Any, List, NoReturn
-from .base import BaseSimulator, SimulationConfig, SimulationResults
+from typing import Optional, List, Any
+from .base import SimulationConfig, check_memory
+from .backend import Backend, CORRELATION_TOLERANCE
 from ..utils.random_utils import validate_correlation_matrix_strict
 
-try:
-    from simflux import _rust
-    RUST_AVAILABLE = True
-except ImportError:
-    RUST_AVAILABLE = False
-    _rust = None
+
+def _validate_sim_dims(n_paths: int, n_steps: int, T: float) -> None:
+    """Shared validation for simulation dimension parameters."""
+    if n_paths <= 0:
+        raise ValueError("n_paths must be positive")
+    if n_steps <= 0:
+        raise ValueError("n_steps must be positive")
+    if T <= 0:
+        raise ValueError("T must be positive")
 
 
-class SimulationEngine(BaseSimulator):
-    """Main simulation engine that coordinates between Python and Rust backends."""
+class SimulationEngine:
+    """Backend dispatcher that delegates simulation work to Rust or NumPy.
+
+    Unlike the simulator classes (GBM, CorrelatedGBM, …) this is **not** a
+    ``BaseSimulator``.  It owns no model parameters and exposes only
+    low-level simulation entry-points.
+    """
 
     def __init__(self, config: Optional[SimulationConfig] = None) -> None:
-        super().__init__(config)
+        self.config = config or SimulationConfig()
+        self.config.validate()
 
-        if not RUST_AVAILABLE:
+        if not Backend.is_available():
             import warnings
             warnings.warn(
                 "Rust backend not available. Using slower NumPy fallback. "
@@ -27,6 +37,12 @@ class SimulationEngine(BaseSimulator):
                 RuntimeWarning
             )
 
+    def _check_memory(self, n_elements: int, element_bytes: int = 8) -> None:
+        check_memory(self.config, n_elements, element_bytes)
+
+    # ------------------------------------------------------------------
+    # Standard GBM
+    # ------------------------------------------------------------------
     def simulate_gbm(self,
                      mu: float,
                      sigma: float,
@@ -35,35 +51,20 @@ class SimulationEngine(BaseSimulator):
                      n_steps: int,
                      T: float = 1.0,
                      **kwargs: Any) -> np.ndarray:
+        """Simulate single-asset GBM paths.
+
+        Returns shape ``(n_paths, n_steps + 1)``.
         """
-        Simulate single-asset Geometric Brownian Motion.
+        if sigma <= 0:
+            raise ValueError("sigma must be positive")
+        if s0 <= 0:
+            raise ValueError("s0 must be positive")
+        _validate_sim_dims(n_paths, n_steps, T)
+        self._check_memory(n_paths * (n_steps + 1))
 
-        Parameters:
-        -----------
-        mu : float
-            Drift parameter
-        sigma : float
-            Volatility parameter
-        s0 : float
-            Initial asset value
-        n_paths : int
-            Number of simulation paths
-        n_steps : int
-            Number of time steps per path
-        T : float, default=1.0
-            Time horizon
-
-        Returns:
-        --------
-        np.ndarray
-            Array of shape (n_paths, n_steps+1) containing simulated paths
-        """
-        self.validate_gbm_inputs(mu, sigma, s0, n_paths, n_steps, T)
-
-        if RUST_AVAILABLE:
+        if Backend.is_available():
             return self._rust_simulate_gbm(mu, sigma, s0, n_paths, n_steps, T)
-        else:
-            return self._numpy_simulate_gbm(mu, sigma, s0, n_paths, n_steps, T)
+        return self._numpy_simulate_gbm(mu, sigma, s0, n_paths, n_steps, T)
 
     def simulate_gbm_correlated(self,
                                mu: List[float],
@@ -74,93 +75,100 @@ class SimulationEngine(BaseSimulator):
                                n_steps: int,
                                T: float = 1.0,
                                **kwargs: Any) -> np.ndarray:
+        """Simulate correlated multi-asset GBM paths.
+
+        Returns shape ``(n_paths, n_assets, n_steps + 1)``.
         """
-        Simulate correlated multi-asset Geometric Brownian Motion.
-
-        Parameters:
-        -----------
-        mu : List[float]
-            Drift parameters for each asset
-        sigma : List[float]
-            Volatility parameters for each asset
-        s0 : List[float]
-            Initial asset values
-        correlation_matrix : np.ndarray
-            Correlation matrix (n_assets x n_assets)
-        n_paths : int
-            Number of simulation paths
-        n_steps : int
-            Number of time steps per path
-        T : float, default=1.0
-            Time horizon
-
-        Returns:
-        --------
-        np.ndarray
-            Array of shape (n_paths, n_assets, n_steps+1) containing simulated paths
-        """
-        self.validate_gbm_correlated_inputs(
-            mu, sigma, s0, correlation_matrix, n_paths, n_steps, T
-        )
-
-        if RUST_AVAILABLE:
-            return self._rust_simulate_gbm_correlated(
-                mu, sigma, s0, correlation_matrix, n_paths, n_steps, T
-            )
-        else:
-            return self._numpy_simulate_gbm_correlated(
-                mu, sigma, s0, correlation_matrix, n_paths, n_steps, T
-            )
-
-    def validate_gbm_inputs(self, mu: float, sigma: float, s0: float,
-                            n_paths: int, n_steps: int, T: float) -> None:
-        """Validate GBM simulation inputs."""
-        if sigma <= 0:
-            raise ValueError("sigma must be positive")
-        if s0 <= 0:
-            raise ValueError("s0 must be positive")
-        if n_paths <= 0:
-            raise ValueError("n_paths must be positive")
-        if n_steps <= 0:
-            raise ValueError("n_steps must be positive")
-        if T <= 0:
-            raise ValueError("T must be positive")
-
-    def validate_gbm_correlated_inputs(self, mu: List[float], sigma: List[float],
-                                       s0: List[float], correlation_matrix: np.ndarray,
-                                       n_paths: int, n_steps: int, T: float) -> None:
-        """Validate correlated GBM simulation inputs."""
         n_assets = len(mu)
-
         if len(sigma) != n_assets:
             raise ValueError("sigma must have same length as mu")
         if len(s0) != n_assets:
             raise ValueError("s0 must have same length as mu")
-
         if correlation_matrix.shape != (n_assets, n_assets):
             raise ValueError(f"correlation_matrix must be {n_assets}x{n_assets}")
-
         validate_correlation_matrix_strict(correlation_matrix)
-
         for s in sigma:
             if s <= 0:
                 raise ValueError("all sigma values must be positive")
-
-        for s in s0:
-            if s <= 0:
+        for sv in s0:
+            if sv <= 0:
                 raise ValueError("all s0 values must be positive")
+        _validate_sim_dims(n_paths, n_steps, T)
+        self._check_memory(n_paths * n_assets * (n_steps + 1))
 
-        self.validate_gbm_inputs(0.0, 0.1, 1.0, n_paths, n_steps, T)  # Validate common params
+        if Backend.is_available():
+            return self._rust_simulate_gbm_correlated(
+                mu, sigma, s0, correlation_matrix, n_paths, n_steps, T
+            )
+        return self._numpy_simulate_gbm_correlated(
+            mu, sigma, s0, correlation_matrix, n_paths, n_steps, T
+        )
 
-    # BaseSimulator compatibility -------------------------------------------------
-    def validate_inputs(self, *_: Any, **__: Any) -> None:
-        """BaseSimulator hook; validation is handled by specific helpers."""
-        return None
+    # ------------------------------------------------------------------
+    # Time-varying GBM
+    # ------------------------------------------------------------------
+    def simulate_gbm_time_varying(self,
+                                  mu_times: List[float],
+                                  mu_values: List[float],
+                                  sigma_times: List[float],
+                                  sigma_values: List[float],
+                                  s0: float,
+                                  n_paths: int,
+                                  n_steps: int,
+                                  T: float) -> np.ndarray:
+        """Simulate single-asset time-varying GBM.
 
-    def _rust_simulate_gbm(self, mu: float, sigma: float, s0: float,
-                           n_paths: int, n_steps: int, T: float) -> np.ndarray:
-        """Call Rust backend for GBM simulation."""
+        Returns shape ``(n_paths, n_steps + 1)``.
+        """
+        _validate_sim_dims(n_paths, n_steps, T)
+        self._check_memory(n_paths * (n_steps + 1))
+
+        if Backend.is_available():
+            return self._rust_simulate_gbm_time_varying(
+                mu_times, mu_values, sigma_times, sigma_values,
+                s0, n_paths, n_steps, T
+            )
+        return self._numpy_simulate_gbm_time_varying(
+            mu_times, mu_values, sigma_times, sigma_values,
+            s0, n_paths, n_steps, T
+        )
+
+    def simulate_gbm_time_varying_correlated(
+        self,
+        mu_times: List[List[float]],
+        mu_values: List[List[float]],
+        sigma_times: List[List[float]],
+        sigma_values: List[List[float]],
+        s0: List[float],
+        correlation_matrix: np.ndarray,
+        n_paths: int,
+        n_steps: int,
+        T: float,
+    ) -> np.ndarray:
+        """Simulate correlated multi-asset time-varying GBM.
+
+        Returns shape ``(n_paths, n_assets, n_steps + 1)``.
+        """
+        n_assets = len(s0)
+        _validate_sim_dims(n_paths, n_steps, T)
+        self._check_memory(n_paths * n_assets * (n_steps + 1))
+
+        if Backend.is_available():
+            return self._rust_simulate_gbm_time_varying_correlated(
+                mu_times, mu_values, sigma_times, sigma_values,
+                s0, correlation_matrix, n_paths, n_steps, T
+            )
+        return self._numpy_simulate_gbm_time_varying_correlated(
+            mu_times, mu_values, sigma_times, sigma_values,
+            s0, correlation_matrix, n_paths, n_steps, T
+        )
+
+    # ==================================================================
+    # Rust implementations
+    # ==================================================================
+    def _rust_simulate_gbm(self, mu, sigma, s0, n_paths, n_steps, T):
         dt = T / n_steps
+        _rust = Backend.get_rust()
         paths = _rust.simulate_gbm(
             mu=mu, sigma=sigma, s0=s0,
             n_paths=n_paths, n_steps=n_steps, dt=dt,
@@ -168,91 +176,156 @@ class SimulationEngine(BaseSimulator):
         )
         return np.array(paths)
 
-    def _numpy_simulate_gbm(self, mu: float, sigma: float, s0: float,
-                            n_paths: int, n_steps: int, T: float) -> np.ndarray:
-        """NumPy fallback for GBM simulation."""
-        self._check_memory(n_paths * (n_steps + 1))
-
-        rng = np.random.default_rng(self.config.seed)
-
+    def _rust_simulate_gbm_correlated(self, mu, sigma, s0, correlation_matrix,
+                                      n_paths, n_steps, T):
         dt = T / n_steps
-        drift = (mu - 0.5 * sigma**2) * dt
-        diffusion = sigma * np.sqrt(dt)
-
-        # Generate random increments
-        dW = rng.normal(0, 1, (n_paths, n_steps))
-
-        # Calculate price paths
-        log_returns = drift + diffusion * dW
-        log_prices = np.cumsum(log_returns, axis=1)
-        log_prices = np.column_stack([np.zeros(n_paths), log_prices])
-
-        # Convert to prices
-        prices = s0 * np.exp(log_prices)
-        return prices
-
-    def _rust_simulate_gbm_correlated(self, mu: List[float], sigma: List[float],
-                                      s0: List[float], correlation_matrix: np.ndarray,
-                                      n_paths: int, n_steps: int, T: float) -> np.ndarray:
-        """Call Rust backend for correlated GBM simulation."""
-        dt = T / n_steps
-        correlation_list = correlation_matrix.tolist()
-
+        _rust = Backend.get_rust()
         paths = _rust.simulate_gbm_multi(
             mu=mu, sigma=sigma, s0=s0,
-            correlation_matrix=correlation_list,
+            correlation_matrix=correlation_matrix.tolist(),
             n_paths=n_paths, n_steps=n_steps, dt=dt,
             seed=self.config.seed
         )
         return np.array(paths)
 
-    def _numpy_simulate_gbm_correlated(self, mu: List[float], sigma: List[float],
-                                       s0: List[float], correlation_matrix: np.ndarray,
-                                       n_paths: int, n_steps: int, T: float) -> np.ndarray:
-        """NumPy fallback for correlated GBM simulation."""
-        n_assets = len(mu)
-        self._check_memory(n_paths * n_assets * (n_steps + 1))
+    def _rust_simulate_gbm_time_varying(self, mu_times, mu_values,
+                                        sigma_times, sigma_values,
+                                        s0, n_paths, n_steps, T):
+        dt = T / n_steps
+        _rust = Backend.get_rust()
+        paths = _rust.simulate_gbm_tv(
+            mu_times=list(mu_times), mu_values=list(mu_values),
+            sigma_times=list(sigma_times), sigma_values=list(sigma_values),
+            s0=s0, n_paths=n_paths, n_steps=n_steps, dt=dt,
+            t_start=0.0, seed=self.config.seed
+        )
+        return np.array(paths)
 
+    def _rust_simulate_gbm_time_varying_correlated(
+        self, mu_times, mu_values, sigma_times, sigma_values,
+        s0, correlation_matrix, n_paths, n_steps, T
+    ):
+        dt = T / n_steps
+        _rust = Backend.get_rust()
+        paths = _rust.simulate_gbm_tv_multi(
+            mu_times=[list(t) for t in mu_times],
+            mu_values=[list(v) for v in mu_values],
+            sigma_times=[list(t) for t in sigma_times],
+            sigma_values=[list(v) for v in sigma_values],
+            s0=list(s0),
+            correlation_matrix=correlation_matrix.tolist(),
+            n_paths=n_paths, n_steps=n_steps, dt=dt,
+            t_start=0.0, seed=self.config.seed
+        )
+        return np.array(paths)
+
+    # ==================================================================
+    # NumPy fallback implementations
+    # ==================================================================
+    def _numpy_simulate_gbm(self, mu, sigma, s0, n_paths, n_steps, T):
         rng = np.random.default_rng(self.config.seed)
+        dt = T / n_steps
+        drift = (mu - 0.5 * sigma**2) * dt
+        diffusion = sigma * np.sqrt(dt)
 
+        dW = rng.normal(0, 1, (n_paths, n_steps))
+        log_returns = drift + diffusion * dW
+        log_prices = np.cumsum(log_returns, axis=1)
+        log_prices = np.column_stack([np.zeros(n_paths), log_prices])
+
+        return s0 * np.exp(log_prices)
+
+    def _numpy_simulate_gbm_correlated(self, mu, sigma, s0, correlation_matrix,
+                                       n_paths, n_steps, T):
+        n_assets = len(mu)
+        rng = np.random.default_rng(self.config.seed)
         dt = T / n_steps
 
-        # Precompute constants
-        drift = np.array([(m - 0.5 * s**2) * dt for m, s in zip(mu, sigma)])
-        vol_sqrt_dt = np.array([s * np.sqrt(dt) for s in sigma])
+        sigma_arr = np.asarray(sigma)
+        drift = (np.asarray(mu) - 0.5 * sigma_arr**2) * dt
+        vol_sqrt_dt = sigma_arr * np.sqrt(dt)
 
-        # Cholesky decomposition for correlation
-        try:
-            L = np.linalg.cholesky(correlation_matrix)
-        except np.linalg.LinAlgError:
-            # If not positive definite, use eigenvalue decomposition
-            eigenvals, eigenvecs = np.linalg.eigh(correlation_matrix)
-            eigenvals = np.maximum(eigenvals, 1e-8)  # Ensure positive
-            L = eigenvecs @ np.diag(np.sqrt(eigenvals))
+        L = _safe_cholesky(correlation_matrix)
 
-        # Initialize paths
         paths = np.zeros((n_paths, n_assets, n_steps + 1))
+        paths[:, :, 0] = np.asarray(s0)
 
-        # Set initial values
-        for i in range(n_assets):
-            paths[:, i, 0] = s0[i]
-
-        # Generate correlated paths
         for step in range(n_steps):
-            # Generate independent random numbers
             independent_randoms = rng.normal(0, 1, (n_paths, n_assets))
-
-            # Apply correlation structure
             correlated_randoms = independent_randoms @ L.T
-
-            # Update paths for each asset
-            for i in range(n_assets):
-                dW = correlated_randoms[:, i]
-                log_return = drift[i] + vol_sqrt_dt[i] * dW
-                paths[:, i, step + 1] = paths[:, i, step] * np.exp(log_return)
+            log_returns = drift + vol_sqrt_dt * correlated_randoms
+            paths[:, :, step + 1] = paths[:, :, step] * np.exp(log_returns)
 
         return paths
 
-    def simulate(self, *args: Any, **kwargs: Any) -> NoReturn:
-        """Generic simulate method - delegates to specific simulators."""
-        raise NotImplementedError("Use specific simulation methods like simulate_gbm()")
+    def _numpy_simulate_gbm_time_varying(self, mu_times, mu_values,
+                                         sigma_times, sigma_values,
+                                         s0, n_paths, n_steps, T):
+        mu_t = np.asarray(mu_times)
+        mu_v = np.asarray(mu_values)
+        sigma_t = np.asarray(sigma_times)
+        sigma_v = np.asarray(sigma_values)
+
+        dt = T / n_steps
+        times = np.linspace(0, T, n_steps + 1)
+
+        paths = np.zeros((n_paths, n_steps + 1))
+        paths[:, 0] = s0
+
+        rng = np.random.default_rng(self.config.seed)
+        dW = rng.normal(0, np.sqrt(dt), (n_paths, n_steps))
+
+        mu_all = np.interp(times[:-1], mu_t, mu_v)
+        sigma_all = np.interp(times[:-1], sigma_t, sigma_v)
+
+        for i in range(n_steps):
+            mu, sigma = mu_all[i], sigma_all[i]
+            paths[:, i + 1] = paths[:, i] * np.exp(
+                (mu - 0.5 * sigma**2) * dt + sigma * dW[:, i]
+            )
+
+        return paths
+
+    def _numpy_simulate_gbm_time_varying_correlated(
+        self, mu_times, mu_values, sigma_times, sigma_values,
+        s0, correlation_matrix, n_paths, n_steps, T
+    ):
+        n_assets = len(s0)
+        dt = T / n_steps
+        times = np.linspace(0, T, n_steps + 1)
+
+        chol = _safe_cholesky(correlation_matrix)
+
+        mu_all = np.array([
+            np.interp(times[:-1], np.asarray(mu_times[j]), np.asarray(mu_values[j]))
+            for j in range(n_assets)
+        ]).T
+        sigma_all = np.array([
+            np.interp(times[:-1], np.asarray(sigma_times[j]), np.asarray(sigma_values[j]))
+            for j in range(n_assets)
+        ]).T
+
+        paths = np.zeros((n_paths, n_assets, n_steps + 1))
+        paths[:, :, 0] = np.asarray(s0)
+
+        rng = np.random.default_rng(self.config.seed)
+
+        for i in range(n_steps):
+            mu, sigma = mu_all[i], sigma_all[i]
+            dW = rng.normal(0, np.sqrt(dt), (n_paths, n_assets))
+            dW_corr = dW @ chol.T
+            paths[:, :, i + 1] = paths[:, :, i] * np.exp(
+                (mu - 0.5 * sigma**2) * dt + sigma * dW_corr
+            )
+
+        return paths
+
+
+def _safe_cholesky(correlation_matrix: np.ndarray) -> np.ndarray:
+    """Cholesky decomposition with eigenvalue fallback for near-singular matrices."""
+    try:
+        return np.linalg.cholesky(correlation_matrix)
+    except np.linalg.LinAlgError:
+        eigenvals, eigenvecs = np.linalg.eigh(correlation_matrix)
+        eigenvals = np.maximum(eigenvals, CORRELATION_TOLERANCE)
+        return eigenvecs @ np.diag(np.sqrt(eigenvals))

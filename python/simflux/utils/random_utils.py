@@ -4,13 +4,15 @@ import numpy as np
 from typing import List, Optional
 import random
 
+from ..core.backend import CORRELATION_TOLERANCE
+
 
 def set_seed(seed: int) -> None:
     """
     Set random seed for reproducible results across Python and NumPy.
-    
-    Parameters:
-    -----------
+
+    Parameters
+    ----------
     seed : int
         Random seed value
     """
@@ -18,23 +20,23 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
 
 
-def generate_correlation_matrix(n: int, 
+def generate_correlation_matrix(n: int,
                                correlation_strength: float = 0.3,
                                random_state: Optional[int] = None) -> np.ndarray:
     """
     Generate a valid correlation matrix with specified average correlation strength.
-    
-    Parameters:
-    -----------
+
+    Parameters
+    ----------
     n : int
         Size of correlation matrix (n x n)
     correlation_strength : float, default=0.3
         Target average off-diagonal correlation (0 to 1)
     random_state : int, optional
         Random seed for reproducibility
-        
-    Returns:
-    --------
+
+    Returns
+    -------
     np.ndarray
         Valid correlation matrix (positive definite, symmetric)
     """
@@ -46,112 +48,94 @@ def generate_correlation_matrix(n: int,
     if n < 2:
         raise ValueError("n must be at least 2")
 
-    # Generate random matrix
     A = rng.normal(0, 1, (n, n))
-    
-    # Make it symmetric
     A = (A + A.T) / 2
-    
-    # Ensure positive definiteness by adding to diagonal
+
     eigenvals = np.linalg.eigvals(A)
     min_eigenval = np.min(eigenvals)
     if min_eigenval <= 0:
         A += np.eye(n) * (abs(min_eigenval) + 0.1)
-    
-    # Convert to correlation matrix
+
     D = np.sqrt(np.diag(A))
     correlation_matrix = A / np.outer(D, D)
-    
-    # Adjust correlation strength
+
     correlation_matrix = adjust_correlation_strength(
-        correlation_matrix, 
+        correlation_matrix,
         target_strength=correlation_strength
     )
-    
-    # Final validation and adjustment
+
     correlation_matrix = ensure_valid_correlation_matrix(correlation_matrix)
-    
+
     return correlation_matrix
 
 
-def adjust_correlation_strength(matrix: np.ndarray, 
+def adjust_correlation_strength(matrix: np.ndarray,
                               target_strength: float) -> np.ndarray:
     """
     Adjust a correlation matrix to have a target average correlation strength.
-    
-    Parameters:
-    -----------
+
+    Parameters
+    ----------
     matrix : np.ndarray
         Input correlation matrix
     target_strength : float
         Target average off-diagonal correlation
-        
-    Returns:
-    --------
+
+    Returns
+    -------
     np.ndarray
         Adjusted correlation matrix
     """
     n = matrix.shape[0]
-    
-    # Calculate current average correlation (off-diagonal)
+
     off_diagonal_mask = ~np.eye(n, dtype=bool)
     current_strength = np.mean(np.abs(matrix[off_diagonal_mask]))
-    
+
     if current_strength == 0:
         return np.eye(n)
-    
-    # Scale off-diagonal elements
+
     scaling_factor = target_strength / current_strength
     adjusted = matrix.copy()
     adjusted[off_diagonal_mask] *= scaling_factor
-    
-    # Ensure diagonal is 1
+
     np.fill_diagonal(adjusted, 1.0)
-    
+
     return adjusted
 
 
-def ensure_valid_correlation_matrix(matrix: np.ndarray, 
+def ensure_valid_correlation_matrix(matrix: np.ndarray,
                                    max_iterations: int = 100) -> np.ndarray:
     """
     Ensure a matrix is a valid correlation matrix through eigenvalue adjustment.
-    
-    Parameters:
-    -----------
+
+    Parameters
+    ----------
     matrix : np.ndarray
         Input matrix
     max_iterations : int, default=100
         Maximum iterations for adjustment
-        
-    Returns:
-    --------
+
+    Returns
+    -------
     np.ndarray
         Valid correlation matrix
     """
     adjusted = matrix.copy()
-    
+
     for _ in range(max_iterations):
-        # Check if already valid
-        eigenvals = np.linalg.eigvals(adjusted)
-        if np.all(eigenvals > 1e-8):
-            break
-        
-        # Eigenvalue decomposition
         eigenvals, eigenvecs = np.linalg.eigh(adjusted)
-        
-        # Adjust negative eigenvalues
-        eigenvals = np.maximum(eigenvals, 1e-8)
-        
-        # Reconstruct matrix
+        if np.all(eigenvals > CORRELATION_TOLERANCE):
+            break
+
+        eigenvals = np.maximum(eigenvals, CORRELATION_TOLERANCE)
+
         adjusted = eigenvecs @ np.diag(eigenvals) @ eigenvecs.T
-        
-        # Normalize to correlation matrix
+
         diag_sqrt = np.sqrt(np.diag(adjusted))
         adjusted = adjusted / np.outer(diag_sqrt, diag_sqrt)
-        
-        # Ensure diagonal is exactly 1
+
         np.fill_diagonal(adjusted, 1.0)
-    
+
     return adjusted
 
 
@@ -160,75 +144,123 @@ def create_block_correlation_matrix(block_sizes: List[int],
                                    inter_block_corr: float = 0.0) -> np.ndarray:
     """
     Create a block correlation matrix with different correlations within/between blocks.
-    
-    Useful for sector-based correlation structures.
-    
-    Parameters:
-    -----------
+
+    Parameters
+    ----------
     block_sizes : list
         Size of each block (e.g., [10, 5, 8] for 3 blocks)
     intra_block_corr : float
         Correlation within blocks
     inter_block_corr : float, default=0.0
         Correlation between blocks
-        
-    Returns:
-    --------
+
+    Returns
+    -------
     np.ndarray
         Block correlation matrix
     """
     total_size = sum(block_sizes)
     correlation_matrix = np.full((total_size, total_size), inter_block_corr)
-    
-    # Fill diagonal blocks
+
     start_idx = 0
     for block_size in block_sizes:
         end_idx = start_idx + block_size
-        
-        # Set intra-block correlations
         correlation_matrix[start_idx:end_idx, start_idx:end_idx] = intra_block_corr
-        
         start_idx = end_idx
-    
-    # Set diagonal to 1
+
     np.fill_diagonal(correlation_matrix, 1.0)
-    
-    # Validate and adjust if necessary
+
     correlation_matrix = ensure_valid_correlation_matrix(correlation_matrix)
-    
+
     return correlation_matrix
 
 
 def correlation_from_factor_loadings(factor_loadings: np.ndarray) -> np.ndarray:
     """
     Create correlation matrix from factor loadings (factor model approach).
-    
-    Parameters:
-    -----------
+
+    Parameters
+    ----------
     factor_loadings : np.ndarray
         Matrix of shape (n_assets, n_factors) with factor loadings
-        
-    Returns:
-    --------
+
+    Returns
+    -------
     np.ndarray
         Implied correlation matrix
     """
-    # Correlation = L @ L.T + D where D is diagonal of specific variances
     correlation_matrix = factor_loadings @ factor_loadings.T
-    
-    # Add specific variance to make diagonal 1
+
     diagonal_adjustment = 1.0 - np.diag(correlation_matrix)
     correlation_matrix += np.diag(diagonal_adjustment)
-    
+
     return correlation_matrix
 
 
 # Validation functions
+def approx_norm_ppf(p: np.ndarray) -> np.ndarray:
+    """Vectorized inverse normal CDF using Acklam's algorithm.
+
+    Accurate to ~1e-8 across the full (0, 1) range.  Used as a fallback
+    when scipy is not installed.
+    """
+    p = np.asarray(p, dtype=float)
+    result = np.empty_like(p)
+    lo = p <= 0; hi = p >= 1; mid = ~lo & ~hi
+    result[lo] = -10.0; result[hi] = 10.0
+    if not np.any(mid):
+        return result
+    pm = p[mid]
+    out = np.empty_like(pm)
+
+    # Central region coefficients
+    a = [-3.969683028665376e+01, 2.209460984245205e+02,
+         -2.759285104469687e+02, 1.383577518672690e+02,
+         -3.066479806614716e+01, 2.506628277459239e+00]
+    b = [-5.447609879822406e+01, 1.615858368580409e+02,
+         -1.556989798598866e+02, 6.680131188771972e+01,
+         -1.328068155288572e+01]
+    # Tail region coefficients
+    c = [-7.784894002430293e-03, -3.223964580411365e-01,
+         -2.400758277161838e+00, -2.549732539343734e+00,
+          4.374664141464968e+00,  2.938163982698783e+00]
+    d = [ 7.784695709041462e-03,  3.224671290700398e-01,
+          2.445134137142996e+00,  3.754408661907416e+00]
+
+    p_low = 0.02425
+    central = (pm >= p_low) & (pm <= 1.0 - p_low)
+    tail_lo = pm < p_low
+    tail_hi = pm > 1.0 - p_low
+
+    if np.any(central):
+        q = pm[central] - 0.5
+        r = q * q
+        out[central] = (
+            (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5]) * q /
+            (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1)
+        )
+    if np.any(tail_lo):
+        q = np.sqrt(-2.0 * np.log(pm[tail_lo]))
+        out[tail_lo] = (
+            (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+            ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
+        )
+    if np.any(tail_hi):
+        q = np.sqrt(-2.0 * np.log(1.0 - pm[tail_hi]))
+        out[tail_hi] = -(
+            (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+            ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
+        )
+
+    result[mid] = out
+    return result
+
+
 def validate_correlation_matrix_strict(
     matrix: np.ndarray,
     name: str = "correlation_matrix",
     check_positive_definite: bool = True,
-    pd_tolerance: float = 1e-12,
+    pd_tolerance: float = CORRELATION_TOLERANCE,
 ) -> None:
     """Validate a correlation matrix, raising ValueError on failure.
 
@@ -247,13 +279,13 @@ def validate_correlation_matrix_strict(
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
         raise ValueError(f"{name} must be square")
 
-    if not np.allclose(matrix, matrix.T):
+    if not np.allclose(matrix, matrix.T, atol=CORRELATION_TOLERANCE):
         raise ValueError(f"{name} must be symmetric")
 
-    if not np.allclose(np.diag(matrix), 1.0):
+    if not np.allclose(np.diag(matrix), 1.0, atol=CORRELATION_TOLERANCE):
         raise ValueError(f"{name} diagonal must be 1.0")
 
-    if np.any(np.abs(matrix) > 1.0):
+    if np.any(np.abs(matrix) > 1.0 + CORRELATION_TOLERANCE):
         raise ValueError(f"{name} values must be between -1 and 1")
 
     eigenvals = np.linalg.eigvals(matrix)
@@ -265,40 +297,36 @@ def validate_correlation_matrix_strict(
             raise ValueError(f"{name} must be positive semi-definite")
 
 
-def validate_correlation_matrix(matrix: np.ndarray, tolerance: float = 1e-8) -> bool:
+def validate_correlation_matrix(matrix: np.ndarray, tolerance: float = CORRELATION_TOLERANCE) -> bool:
     """
     Validate if a matrix is a proper correlation matrix.
-    
-    Parameters:
-    -----------
+
+    Parameters
+    ----------
     matrix : np.ndarray
         Matrix to validate
-    tolerance : float, default=1e-8
+    tolerance : float
         Numerical tolerance for checks
-        
-    Returns:
-    --------
+
+    Returns
+    -------
     bool
         True if valid correlation matrix
     """
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
         return False
-    
-    # Check symmetry
+
     if not np.allclose(matrix, matrix.T, atol=tolerance):
         return False
-    
-    # Check diagonal
+
     if not np.allclose(np.diag(matrix), 1.0, atol=tolerance):
         return False
-    
-    # Check bounds
+
     if np.any(matrix < -1 - tolerance) or np.any(matrix > 1 + tolerance):
         return False
-    
-    # Check positive semi-definite
+
     eigenvals = np.linalg.eigvals(matrix)
     if np.any(eigenvals < -tolerance):
         return False
-    
+
     return True
