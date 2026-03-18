@@ -1,4 +1,4 @@
-name: Build Wheels
+name: Build & Release Wheels
 
 on:
   push:
@@ -6,23 +6,19 @@ on:
     tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels – ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]  # macos-13 for Intel Macs
-        
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+
     steps:
     - uses: actions/checkout@v4
-
-    - name: Set up Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
 
     - name: Build wheels
       uses: PyO3/maturin-action@v1
@@ -30,7 +26,7 @@ jobs:
         args: --release --out dist --find-interpreter
         sccache: 'true'
         manylinux: auto
-        
+
     - name: Upload wheels
       uses: actions/upload-artifact@v4
       with:
@@ -55,22 +51,90 @@ jobs:
         name: wheels-sdist
         path: dist
 
-  upload_all:
-    name: Upload if release
-    needs: [build_wheels, build_sdist]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    
+  test_wheels:
+    name: Test wheel – ${{ matrix.os }} / py${{ matrix.python-version }}
+    needs: build_wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+
     steps:
-    - uses: actions/download-artifact@v4
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Download wheels
+      uses: actions/download-artifact@v4
+      with:
+        name: wheels-${{ matrix.os }}
+        path: dist
+
+    - name: Install wheel + test deps
+      run: |
+        pip install --find-links dist simflux
+        pip install pytest
+
+    - name: Smoke test
+      run: |
+        python -c "
+        import simflux as sf
+        from simflux.core.backend import Backend
+        assert Backend.is_available(), 'Rust backend not found in wheel'
+        paths = sf.GBM(mu=0.05, sigma=0.2, S0=100).simulate(n_paths=100, n_steps=10)
+        assert paths.shape == (100, 11)
+        p = sf.TwoFactorPortfolio.create_sample_portfolio(n_assets_per_sector=5, sectors=['A','B'])
+        r = p.simulate(n_simulations=50)
+        assert r['portfolio_statistics']['mean'] >= 0
+        print('Smoke test passed')
+        "
+
+    - name: Run test suite
+      run: pytest tests/ -v --benchmark-skip -x
+
+  # Create a GitHub Release with all wheels attached
+  release:
+    name: Create GitHub Release
+    needs: [test_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write  # Required to create releases
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
       with:
         path: dist
         merge-multiple: true
 
-    - name: Publish to PyPI
-      uses: PyO3/maturin-action@v1
-      env:
-        MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    - name: List wheels
+      run: ls -lh dist/
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
       with:
-        command: upload
-        args: --non-interactive --skip-existing dist/*
+        files: dist/*
+        generate_release_notes: true
+        body: |
+          ## Installation
+
+          Download the wheel for your platform and install:
+          ```bash
+          pip install simflux-*.whl
+          ```
+
+          Or install directly from this release:
+          ```bash
+          pip install simflux --find-links https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/
+          ```
+
+          ### Included wheels
+          - **Linux** (x86_64, manylinux)
+          - **macOS** (Apple Silicon arm64 + Intel x86_64)
+          - **Windows** (x86_64)
+          - **Python 3.12 and 3.13**

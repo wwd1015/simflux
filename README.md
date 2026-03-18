@@ -178,6 +178,59 @@ high_loss_trials = analyzer.query_high_loss_trials(percentile=99)
 sector_analysis = analyzer.analyze_by_sector()
 ```
 
+### Multi-Period Portfolio Simulation
+
+Simulate losses over multiple periods with quarterly PD term structures and default timing:
+
+```python
+# Define assets with cumulative PD term structure (quarterly over 2 years)
+asset = sf.AssetData(
+    asset_id=0, sector_id=0, pd=0.06,
+    lgd_mean=0.5, lgd_std=0.1, exposure=1_000_000,
+    sector_name="Tech",
+    pd_term_structure=[0.01, 0.025, 0.04, 0.06],  # cumulative PDs at Q1–Q4
+)
+
+# Simulate with quarterly time steps
+results = portfolio.simulate(
+    n_simulations=100000,
+    n_periods=8,          # 8 quarters
+    period_length=0.25,   # each quarter = 0.25 years
+)
+# Results include time_to_default for each asset in each trial
+```
+
+When no `pd_term_structure` is provided, the flat `pd` is spread across periods assuming a constant hazard rate.
+
+## Methodology
+
+For a detailed explanation of the simulation models, mathematical foundations, and parameter guidance, see the **[Methodology Document](docs/methodology.md)**.
+
+Topics covered:
+- GBM discretization and Cholesky correlation
+- Two-factor Merton credit framework (asset value model, default mechanism, stochastic LGD)
+- Multi-period extension with conditional PD derivation
+- Convergence guidance for Monte Carlo simulations
+- Comparison with industry models (RiskFrontier, CreditMetrics, Basel IRB)
+
+## Installation from Pre-Built Wheels
+
+Pre-built wheels with the compiled Rust backend are attached to [GitHub Releases](../../releases). Available for:
+- **Linux** (x86_64, manylinux)
+- **macOS** (Apple Silicon + Intel)
+- **Windows** (x86_64)
+- **Python 3.12 and 3.13**
+
+```bash
+# Install directly from a GitHub release (replace v0.1.0 with the actual tag)
+pip install simflux --find-links https://github.com/wwd1015/simflux/releases/download/v0.1.0/
+
+# Or download the .whl file for your platform and install locally
+pip install simflux-0.1.0-cp312-cp312-manylinux_2_17_x86_64.whl
+```
+
+No Rust toolchain required when using pre-built wheels.
+
 ## License
 
 MIT License
