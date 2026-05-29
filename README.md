@@ -162,10 +162,16 @@ portfolio = sf.TwoFactorPortfolio(
 results = portfolio.simulate(n_simulations=100000)
 print(results['portfolio_statistics'])  # mean loss, VaR, expected shortfall, etc.
 
-# With interim results saved to disk for detailed analysis
+# The result keys are identical whether the Rust backend or the NumPy fallback ran:
+#   portfolio_statistics, sector_statistics, n_trials, n_assets, n_sectors,
+#   sector_names, n_periods, period_length, time_horizon
+# ('analyzer' is added only when interim results are stored — see below)
+
+# With interim results saved to disk for detailed analysis.
+# StorageConfig exposes the fields the writer honors: store_interim, output_path, batch_size.
 storage_config = sf.StorageConfig(
     store_interim=True,
-    output_path="simulation_results.parquet"
+    output_path="simulation_results.parquet",
 )
 results = portfolio.simulate(
     n_simulations=100000,

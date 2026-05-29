@@ -164,13 +164,13 @@ fn get_conditional_pd(asset: &AssetData, period: usize, n_periods: usize) -> f64
 #[derive(Debug, Clone)]
 pub struct PortfolioConfig {
     #[pyo3(get, set)]
-    pub inter_sector_correlation: f64,
-    #[pyo3(get, set)]
     pub intra_sector_correlations: Vec<f64>,
     #[pyo3(get, set)]
     pub systematic_lgd_correlation: f64,
     #[pyo3(get, set)]
     pub sector_names: Vec<String>,
+    /// Full sector correlation matrix — the single source of truth for
+    /// cross-sector coupling.  No scalar summary is carried on the seam.
     #[pyo3(get, set)]
     pub sector_correlation_matrix: Vec<Vec<f64>>,
 }
@@ -178,19 +178,13 @@ pub struct PortfolioConfig {
 #[pymethods]
 impl PortfolioConfig {
     #[new]
-    #[pyo3(signature = (inter_sector_correlation, intra_sector_correlations, systematic_lgd_correlation, sector_names, sector_correlation_matrix=None))]
+    #[pyo3(signature = (intra_sector_correlations, systematic_lgd_correlation, sector_names, sector_correlation_matrix=None))]
     pub fn new(
-        inter_sector_correlation: f64,
         intra_sector_correlations: Vec<f64>,
         systematic_lgd_correlation: f64,
         sector_names: Vec<String>,
         sector_correlation_matrix: Option<Vec<Vec<f64>>>,
     ) -> PyResult<Self> {
-        if inter_sector_correlation.abs() > 1.0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Inter-sector correlation must be between -1 and 1"
-            ));
-        }
         if systematic_lgd_correlation.abs() > 1.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Systematic LGD correlation must be between -1 and 1"
@@ -226,7 +220,7 @@ impl PortfolioConfig {
             }
         }
         Ok(PortfolioConfig {
-            inter_sector_correlation, intra_sector_correlations,
+            intra_sector_correlations,
             systematic_lgd_correlation, sector_names,
             sector_correlation_matrix: matrix,
         })
@@ -317,6 +311,7 @@ pub fn simulate_portfolio_losses(
     seed: Option<u64>,
     store_interim: bool,
     output_path: Option<String>,
+    batch_size: Option<usize>,
 ) -> Result<SimulationResults, PortfolioError> {
     validate_portfolio_inputs(config, assets)?;
 
@@ -338,7 +333,6 @@ pub fn simulate_portfolio_losses(
         .collect();
 
     let correlation_structure = TwoFactorCorrelationStructure::new(
-        config.inter_sector_correlation,
         config.intra_sector_correlations.clone(),
         sector_sizes,
         Some(config.sector_correlation_matrix.clone()),
@@ -387,7 +381,7 @@ pub fn simulate_portfolio_losses(
 
     if store_interim {
         if let Some(ref path) = output_path {
-            store_interim_results(&trial_results, path, &config.sector_names)?;
+            store_interim_results(&trial_results, path, &config.sector_names, batch_size)?;
         }
     }
 
@@ -547,12 +541,13 @@ fn store_interim_results(
     trial_results: &[TrialResult],
     output_path: &str,
     sector_names: &[String],
+    batch_size: Option<usize>,
 ) -> Result<(), PortfolioError> {
     if output_path.is_empty() {
         return Err(PortfolioError::StorageError("Empty output path".to_string()));
     }
     crate::storage::write_simulation_results_to_parquet(
-        trial_results, output_path, sector_names, Some(10000),
+        trial_results, output_path, sector_names, batch_size,
     ).map_err(|e| PortfolioError::StorageError(e.to_string()))
 }
 
@@ -601,7 +596,7 @@ mod tests {
     #[test]
     fn test_portfolio_config_creation() {
         let config = PortfolioConfig::new(
-            0.2, vec![0.4, 0.3], 0.1,
+            vec![0.4, 0.3], 0.1,
             vec!["Tech".to_string(), "Finance".to_string()],
             Some(vec![vec![1.0, 0.2], vec![0.2, 1.0]]),
         ).unwrap();

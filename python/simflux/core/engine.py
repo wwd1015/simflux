@@ -3,8 +3,8 @@
 import numpy as np
 from typing import Optional, List, Any
 from .base import SimulationConfig, check_memory
-from .backend import Backend, CORRELATION_TOLERANCE
-from ..utils.random_utils import validate_correlation_matrix_strict
+from .backend import Backend
+from ..utils.random_utils import validate_correlation_matrix_strict, safe_cholesky
 
 
 def _validate_sim_dims(n_paths: int, n_steps: int, T: float) -> None:
@@ -166,58 +166,67 @@ class SimulationEngine:
     # ==================================================================
     # Rust implementations
     # ==================================================================
-    def _rust_simulate_gbm(self, mu, sigma, s0, n_paths, n_steps, T):
-        dt = T / n_steps
+    def _rust_call(self, fn_name: str, expected_shape: tuple, **kwargs: Any) -> np.ndarray:
+        """Marshal one Rust simulation call and guard its result shape.
+
+        Concentrates the three steps every Rust path shares — fetch the backend,
+        rebuild the ndarray, and assert the documented axis convention — so an
+        axis/ordering change in the Rust layer fails loudly here rather than
+        surfacing as silently wrong numbers downstream.
+        """
         _rust = Backend.get_rust()
-        paths = _rust.simulate_gbm(
+        paths = np.array(getattr(_rust, fn_name)(**kwargs))
+        if paths.shape != expected_shape:
+            raise RuntimeError(
+                f"Rust backend '{fn_name}' returned shape {paths.shape}, "
+                f"expected {expected_shape}; Python/Rust marshalling is out of sync."
+            )
+        return paths
+
+    def _rust_simulate_gbm(self, mu, sigma, s0, n_paths, n_steps, T):
+        return self._rust_call(
+            "simulate_gbm", (n_paths, n_steps + 1),
             mu=mu, sigma=sigma, s0=s0,
-            n_paths=n_paths, n_steps=n_steps, dt=dt,
-            seed=self.config.seed
+            n_paths=n_paths, n_steps=n_steps, dt=T / n_steps,
+            seed=self.config.seed,
         )
-        return np.array(paths)
 
     def _rust_simulate_gbm_correlated(self, mu, sigma, s0, correlation_matrix,
                                       n_paths, n_steps, T):
-        dt = T / n_steps
-        _rust = Backend.get_rust()
-        paths = _rust.simulate_gbm_multi(
+        return self._rust_call(
+            "simulate_gbm_multi", (n_paths, len(mu), n_steps + 1),
             mu=mu, sigma=sigma, s0=s0,
             correlation_matrix=correlation_matrix.tolist(),
-            n_paths=n_paths, n_steps=n_steps, dt=dt,
-            seed=self.config.seed
+            n_paths=n_paths, n_steps=n_steps, dt=T / n_steps,
+            seed=self.config.seed,
         )
-        return np.array(paths)
 
     def _rust_simulate_gbm_time_varying(self, mu_times, mu_values,
                                         sigma_times, sigma_values,
                                         s0, n_paths, n_steps, T):
-        dt = T / n_steps
-        _rust = Backend.get_rust()
-        paths = _rust.simulate_gbm_tv(
+        return self._rust_call(
+            "simulate_gbm_tv", (n_paths, n_steps + 1),
             mu_times=list(mu_times), mu_values=list(mu_values),
             sigma_times=list(sigma_times), sigma_values=list(sigma_values),
-            s0=s0, n_paths=n_paths, n_steps=n_steps, dt=dt,
-            t_start=0.0, seed=self.config.seed
+            s0=s0, n_paths=n_paths, n_steps=n_steps, dt=T / n_steps,
+            t_start=0.0, seed=self.config.seed,
         )
-        return np.array(paths)
 
     def _rust_simulate_gbm_time_varying_correlated(
         self, mu_times, mu_values, sigma_times, sigma_values,
         s0, correlation_matrix, n_paths, n_steps, T
     ):
-        dt = T / n_steps
-        _rust = Backend.get_rust()
-        paths = _rust.simulate_gbm_tv_multi(
+        return self._rust_call(
+            "simulate_gbm_tv_multi", (n_paths, len(s0), n_steps + 1),
             mu_times=[list(t) for t in mu_times],
             mu_values=[list(v) for v in mu_values],
             sigma_times=[list(t) for t in sigma_times],
             sigma_values=[list(v) for v in sigma_values],
             s0=list(s0),
             correlation_matrix=correlation_matrix.tolist(),
-            n_paths=n_paths, n_steps=n_steps, dt=dt,
-            t_start=0.0, seed=self.config.seed
+            n_paths=n_paths, n_steps=n_steps, dt=T / n_steps,
+            t_start=0.0, seed=self.config.seed,
         )
-        return np.array(paths)
 
     # ==================================================================
     # NumPy fallback implementations
@@ -245,7 +254,7 @@ class SimulationEngine:
         drift = (np.asarray(mu) - 0.5 * sigma_arr**2) * dt
         vol_sqrt_dt = sigma_arr * np.sqrt(dt)
 
-        L = _safe_cholesky(correlation_matrix)
+        L = safe_cholesky(correlation_matrix)
 
         paths = np.zeros((n_paths, n_assets, n_steps + 1))
         paths[:, :, 0] = np.asarray(s0)
@@ -294,7 +303,7 @@ class SimulationEngine:
         dt = T / n_steps
         times = np.linspace(0, T, n_steps + 1)
 
-        chol = _safe_cholesky(correlation_matrix)
+        chol = safe_cholesky(correlation_matrix)
 
         mu_all = np.array([
             np.interp(times[:-1], np.asarray(mu_times[j]), np.asarray(mu_values[j]))
@@ -319,13 +328,3 @@ class SimulationEngine:
             )
 
         return paths
-
-
-def _safe_cholesky(correlation_matrix: np.ndarray) -> np.ndarray:
-    """Cholesky decomposition with eigenvalue fallback for near-singular matrices."""
-    try:
-        return np.linalg.cholesky(correlation_matrix)
-    except np.linalg.LinAlgError:
-        eigenvals, eigenvecs = np.linalg.eigh(correlation_matrix)
-        eigenvals = np.maximum(eigenvals, CORRELATION_TOLERANCE)
-        return eigenvecs @ np.diag(np.sqrt(eigenvals))

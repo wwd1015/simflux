@@ -139,6 +139,49 @@ def ensure_valid_correlation_matrix(matrix: np.ndarray,
     return adjusted
 
 
+def safe_cholesky(matrix: np.ndarray, name: str = "correlation_matrix") -> np.ndarray:
+    """Decompose ``matrix`` into a sampling factor ``L`` with ``L @ L.T ≈ matrix``.
+
+    This is the single decompose-or-repair primitive used by every correlated
+    sampler (correlated GBM, time-varying correlated GBM, the portfolio NumPy
+    fallback, and the pure-Python correlation structure).  It defines one repair
+    policy and one error mode so the running decomposition has a single home:
+
+    1. Attempt a plain Cholesky decomposition (exact for positive-definite input).
+    2. If that fails (near-singular / positive-semi-definite), repair the matrix
+       by clamping its eigenvalues to ``CORRELATION_TOLERANCE`` and return the
+       resulting square-root factor.
+    3. If even the repaired factor is not finite, raise ``ValueError`` — this
+       primitive never lets a raw ``numpy.linalg.LinAlgError`` leak to callers.
+
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Symmetric correlation/covariance matrix.
+    name : str
+        Label used in the error message.
+
+    Returns
+    -------
+    np.ndarray
+        A factor ``L`` such that ``L @ L.T`` reproduces ``matrix``.  For the
+        repaired path ``L`` is a square root rather than lower-triangular, which
+        is equivalent for generating correlated draws via ``samples @ L.T``.
+    """
+    matrix = np.asarray(matrix, dtype=float)
+    try:
+        return np.linalg.cholesky(matrix)
+    except np.linalg.LinAlgError:
+        eigenvals, eigenvecs = np.linalg.eigh(matrix)
+        eigenvals = np.maximum(eigenvals, CORRELATION_TOLERANCE)
+        factor = eigenvecs @ np.diag(np.sqrt(eigenvals))
+        if not np.all(np.isfinite(factor)):
+            raise ValueError(
+                f"{name} could not be decomposed: it is not positive semi-definite"
+            )
+        return factor
+
+
 def create_block_correlation_matrix(block_sizes: List[int],
                                    intra_block_corr: float,
                                    inter_block_corr: float = 0.0) -> np.ndarray:
@@ -299,34 +342,33 @@ def validate_correlation_matrix_strict(
 
 def validate_correlation_matrix(matrix: np.ndarray, tolerance: float = CORRELATION_TOLERANCE) -> bool:
     """
-    Validate if a matrix is a proper correlation matrix.
+    Validate if a matrix is a proper (positive semi-definite) correlation matrix.
+
+    This is the boolean counterpart of :func:`validate_correlation_matrix_strict`
+    and is implemented as a thin ``try/except`` over it, so the two share one
+    check body. The structural checks (symmetry, unit diagonal, value range) use
+    the shared ``CORRELATION_TOLERANCE``; the ``tolerance`` argument here governs
+    only the positive-semi-definiteness check.
 
     Parameters
     ----------
     matrix : np.ndarray
         Matrix to validate
     tolerance : float
-        Numerical tolerance for checks
+        Numerical tolerance for the positive-semi-definiteness check
 
     Returns
     -------
     bool
         True if valid correlation matrix
     """
+    matrix = np.asarray(matrix, dtype=float)
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
         return False
-
-    if not np.allclose(matrix, matrix.T, atol=tolerance):
+    try:
+        validate_correlation_matrix_strict(
+            matrix, check_positive_definite=False, pd_tolerance=tolerance
+        )
+        return True
+    except ValueError:
         return False
-
-    if not np.allclose(np.diag(matrix), 1.0, atol=tolerance):
-        return False
-
-    if np.any(matrix < -1 - tolerance) or np.any(matrix > 1 + tolerance):
-        return False
-
-    eigenvals = np.linalg.eigvals(matrix)
-    if np.any(eigenvals < -tolerance):
-        return False
-
-    return True

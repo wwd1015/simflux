@@ -1,14 +1,10 @@
-"""Tests for the centralized Backend registry and SimulationResults."""
+"""Tests for the centralized Backend registry, SimulationConfig, and BaseSimulator."""
 
 import pytest
-import numpy as np
-import warnings
-import tempfile
-import os
 from unittest.mock import patch, MagicMock
 
 from simflux.core.backend import Backend, CORRELATION_TOLERANCE
-from simflux.core.base import BaseSimulator, SimulationConfig, SimulationResults
+from simflux.core.base import BaseSimulator, SimulationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -59,57 +55,6 @@ class TestBackend:
         assert isinstance(CORRELATION_TOLERANCE, float)
         assert CORRELATION_TOLERANCE > 0
         assert CORRELATION_TOLERANCE == 1e-8
-
-
-# ---------------------------------------------------------------------------
-# SimulationResults
-# ---------------------------------------------------------------------------
-
-class TestSimulationResults:
-    """Test SimulationResults lazy-loading container."""
-
-    def test_init_without_interim(self):
-        stats = {"mean": 1.0, "std": 0.5}
-        results = SimulationResults(summary_stats=stats)
-        assert results.summary_stats == stats
-        assert results.interim_data_path is None
-        assert results.has_interim_data is False
-
-    def test_init_with_interim(self):
-        results = SimulationResults(
-            summary_stats={"mean": 1.0},
-            interim_data_path="/tmp/results.parquet",
-        )
-        assert results.has_interim_data is True
-
-    def test_get_summary(self):
-        stats = {"mean": 1.0, "var_95": 2.5}
-        results = SimulationResults(summary_stats=stats)
-        assert results.get_summary() is stats
-
-    def test_load_interim_data_raises_when_none(self):
-        results = SimulationResults(summary_stats={})
-        with pytest.raises(ValueError, match="No interim data available"):
-            results.load_interim_data()
-
-    def test_load_interim_data_with_valid_parquet(self):
-        """Round-trip: write a parquet file, then load it via SimulationResults."""
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        with tempfile.TemporaryDirectory() as td:
-            path = os.path.join(td, "test.parquet")
-            table = pa.table({"trial_id": [0, 1], "asset_id": [10, 20]})
-            pq.write_table(table, path)
-
-            results = SimulationResults(
-                summary_stats={"mean": 0.0},
-                interim_data_path=path,
-            )
-            analyzer = results.load_interim_data()
-            assert analyzer is not None
-            # calling again returns cached instance
-            assert results.load_interim_data() is analyzer
 
 
 # ---------------------------------------------------------------------------

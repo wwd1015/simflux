@@ -1,4 +1,12 @@
-"""Pure-Python two-factor correlation helpers used by the fallback backend."""
+"""Pure-Python two-factor correlation diagnostics and inspection helpers.
+
+These helpers let you *inspect* a two-factor correlation structure — build the
+full asset correlation matrix, read factor loadings, sample sector factors, and
+run structural validation.  They are NOT on the simulation hot path: the Rust
+backend and the NumPy fallback each derive their loadings and sector factors
+inline, so this module is for inspection/diagnostics rather than a drop-in
+replica of either backend.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +15,8 @@ from math import sqrt
 from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
+
+from ..utils.random_utils import safe_cholesky
 
 
 class CorrelationError(ValueError):
@@ -26,7 +36,15 @@ class SystematicFactors:
 
 
 class TwoFactorCorrelationStructure:
-    """Replicates the Rust two-factor correlation loading in pure Python."""
+    """Inspectable two-factor correlation structure (diagnostics helper).
+
+    Builds the full asset-by-asset correlation matrix, factor loadings, and
+    sampled sector factors for a two-factor model so they can be examined and
+    validated.  This is a standalone inspection tool — the production portfolio
+    simulation does not route through it (each backend computes its loadings and
+    factors inline), so treat its outputs as diagnostics rather than a guarantee
+    of bit-for-bit agreement with a running simulation.
+    """
 
     def __init__(
         self,
@@ -53,7 +71,9 @@ class TwoFactorCorrelationStructure:
         self.n_assets = sum(self.sector_sizes)
 
         self._sector_corr_matrix = self._build_sector_correlation_matrix(sector_correlation_matrix)
-        self._sector_cholesky = np.linalg.cholesky(self._sector_corr_matrix)
+        self._sector_cholesky = safe_cholesky(
+            self._sector_corr_matrix, name="sector_correlation_matrix"
+        )
 
         self._asset_indices = self._build_asset_index_map()
 

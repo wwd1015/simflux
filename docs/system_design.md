@@ -37,14 +37,14 @@ SimFlux uses a hybrid Python/Rust architecture:
 
 ### core/base.py
 - `BaseSimulator`: Abstract base class defining simulator interface (`simulate`, `validate_inputs`)
-- `SimulationConfig`: Seed, batch_size, memory_limit_gb, progress_callback
-- `SimulationResults`: Result container with lazy `load_interim_data()` via `ParquetResultsAnalyzer`
+- `SimulationConfig`: Seed, batch_size, memory_limit_gb, progress_callback. The `seed` docstring states the **within-backend** (not cross-backend) reproducibility contract.
 
 ### core/engine.py
 - `SimulationEngine`: Routes simulation calls to Rust or NumPy — **not** a `BaseSimulator` subclass
 - Entry-points: `simulate_gbm()`, `simulate_gbm_correlated()`, `simulate_gbm_time_varying()`, `simulate_gbm_time_varying_correlated()`
-- Handles Cholesky decomposition for correlated simulations (NumPy fallback path)
-- Centralized input validation — simulator classes delegate to the engine
+- Correlated NumPy paths decompose via the shared `safe_cholesky` primitive in `utils/random_utils.py` (one repair-or-`ValueError` policy across all samplers)
+- Each Rust call is marshalled through `_rust_call`, which guards the returned array shape so a Python/Rust axis mismatch fails loudly
+- Per-run dimension validation lives here; per-model parameter validation lives on the simulator classes
 
 ### processes/gbm.py
 - `GBM`: Single-asset Geometric Brownian Motion (dS = μS dt + σS dW)
@@ -59,24 +59,26 @@ SimFlux uses a hybrid Python/Rust architecture:
 
 ### portfolio/two_factor_model.py
 - `AssetData`: Credit asset parameters (PD, LGD, exposure, sector)
+- `PortfolioResult`: `TypedDict` documenting the result contract **both backends honor** — same key set (`portfolio_statistics`, `sector_statistics`, `n_trials`, plus metadata); `analyzer` only when interim results are stored
 - `TwoFactorPortfolio`: Merton two-factor credit model
   - Systematic factor = sector loading × sector factor + idio loading × noise
   - Default if asset value ≤ Φ⁻¹(PD)
   - LGD via correlated Beta distribution
+  - The full sector correlation matrix is the single source of truth at the Rust seam (no scalar `inter_sector_correlation` is passed)
 
 ### portfolio/correlation.py
-- `TwoFactorCorrelationStructure`: Builds full asset correlation matrices
-- Intra-sector and inter-sector correlation handling
-- Factor loading computation
+- `TwoFactorCorrelationStructure`: standalone **diagnostics/inspection** helper — builds the full asset correlation matrix, factor loadings, and sampled sector factors for examination. It is **not** on the simulation hot path (each backend computes loadings/factors inline); treat its output as diagnostics, not a guarantee of bit-for-bit agreement with a run.
 
 ### utils/storage.py
-- `StorageConfig`: Parquet storage configuration (HDF5 format accepted in config but not implemented)
-- `ParquetResultsAnalyzer`: Lazy Polars-based analysis of simulation results
-- **Rust storage is fully functional**: Portfolio simulation writes interim results to Parquet via the Rust `ArrowWriter` backend
+- `StorageConfig`: interim-storage configuration — only the honored fields (`store_interim`, `output_path`, `batch_size`); `batch_size` is threaded into the Rust writer
+- `Columns`: single Python-side source of truth for the interim Parquet column names (kept in sync with `src/storage.rs`)
+- `ParquetResultsAnalyzer`: Lazy Polars-based analysis; filters are expressed in domain terms (trial range, sectors, asset ids) rather than raw Polars expressions
+- **Rust storage is fully functional**: Portfolio simulation writes interim results to Parquet via the Rust `ArrowWriter` backend (always Snappy-compressed)
 
 ### utils/random_utils.py
 - `set_seed()`: Set global random seed for reproducibility (legacy API, also exported at top level)
-- Correlation matrix generation, validation, and correction — all using `CORRELATION_TOLERANCE`
+- `safe_cholesky()`: the single decompose-or-repair primitive used by every correlated sampler — repairs near-singular matrices and raises `ValueError` (never a raw `LinAlgError`)
+- Correlation matrix generation, validation, and correction — all using `CORRELATION_TOLERANCE`; the boolean `validate_correlation_matrix` is a thin wrapper over the raising `validate_correlation_matrix_strict`
 - Block correlation matrices, factor-based correlation
 
 ## 3. Backend Selection Strategy

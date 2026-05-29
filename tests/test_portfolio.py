@@ -346,13 +346,7 @@ class TestStorageConfig:
         config = sf.StorageConfig()
 
         assert config.store_interim is False
-        assert config.store_defaults is True
-        assert config.store_losses is True
-        assert config.store_systematic_factors is False
-        assert config.format == "parquet"
         assert config.output_path is None
-        assert config.partition_by == []
-        assert config.compression == "snappy"
         assert config.batch_size == 10000
 
     def test_storage_config_custom_values(self):
@@ -360,24 +354,17 @@ class TestStorageConfig:
         config = sf.StorageConfig(
             store_interim=True,
             output_path="test_results.parquet",
-            compression="zstd",
-            partition_by=["sector", "trial_id"]
+            batch_size=5000,
         )
 
         assert config.store_interim is True
         assert config.output_path == "test_results.parquet"
-        assert config.compression == "zstd"
-        assert config.partition_by == ["sector", "trial_id"]
+        assert config.batch_size == 5000
 
-    def test_storage_config_invalid_format(self):
-        """Test StorageConfig with invalid format."""
-        with pytest.raises(ValueError, match="format must be one of"):
-            sf.StorageConfig(format="invalid_format")
-
-    def test_storage_config_invalid_compression(self):
-        """Test StorageConfig with invalid compression."""
-        with pytest.raises(ValueError, match="compression must be one of"):
-            sf.StorageConfig(compression="invalid_compression")
+    def test_storage_config_invalid_batch_size(self):
+        """Test StorageConfig rejects a non-positive batch size."""
+        with pytest.raises(ValueError, match="batch_size must be positive"):
+            sf.StorageConfig(batch_size=0)
 
 
 class TestInterimStorage:

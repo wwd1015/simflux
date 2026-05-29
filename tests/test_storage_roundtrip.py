@@ -139,6 +139,22 @@ class TestStorageRoundtrip:
             assert isinstance(df, pd.DataFrame)
             assert len(df) > 0
 
+            # The domain filters must actually wire through to the query.
+            cols = analyzer.export_to_pandas(columns=["trial_id", "loss_amount"])
+            assert list(cols.columns) == ["trial_id", "loss_amount"]
+
+            tr = analyzer.export_to_pandas(trial_range=(0, 5))
+            assert len(tr) > 0
+            assert tr["trial_id"].min() >= 0 and tr["trial_id"].max() <= 5
+
+            tech = analyzer.export_to_pandas(sectors=["Tech"])
+            assert len(tech) > 0
+            assert set(tech["sector"].unique()) == {"Tech"}
+
+            a01 = analyzer.export_to_pandas(asset_ids=[0, 1])
+            assert len(a01) > 0
+            assert set(a01["asset_id"].unique()) <= {0, 1}
+
     @pytest.mark.skipif(not Backend.is_available(), reason="Rust backend required")
     def test_close(self, sample_portfolio):
         with tempfile.TemporaryDirectory() as td:
@@ -152,19 +168,3 @@ class TestStorageRoundtrip:
             # Re-access should recreate it
             _ = analyzer.lazy_frame
             assert analyzer._lazy_frame is not None
-
-
-class TestStorageConfigDefaults:
-    """Test StorageConfig partition_by auto-population."""
-
-    def test_partition_by_default_when_interim(self):
-        config = sf.StorageConfig(store_interim=True)
-        assert config.partition_by == ["sector"]
-
-    def test_partition_by_default_when_no_interim(self):
-        config = sf.StorageConfig(store_interim=False)
-        assert config.partition_by == []
-
-    def test_partition_by_custom_preserved(self):
-        config = sf.StorageConfig(store_interim=True, partition_by=["trial_id"])
-        assert config.partition_by == ["trial_id"]

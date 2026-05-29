@@ -4,12 +4,12 @@ import numpy as np
 import pandas as pd
 import warnings
 from math import erf, sqrt
-from typing import List, Optional, Dict, Any, Union
-from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any, Union, TypedDict, NotRequired
+from dataclasses import dataclass
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.backend import Backend, CORRELATION_TOLERANCE
 from ..utils.storage import StorageConfig, ParquetResultsAnalyzer
-from ..utils.random_utils import validate_correlation_matrix_strict, approx_norm_ppf
+from ..utils.random_utils import validate_correlation_matrix_strict, approx_norm_ppf, safe_cholesky
 
 
 @dataclass
@@ -138,6 +138,28 @@ class AssetData:
         return assets
 
 
+class PortfolioResult(TypedDict):
+    """Result contract returned by :meth:`TwoFactorPortfolio.simulate`.
+
+    Both the Rust backend and the NumPy fallback populate exactly these keys, so
+    a caller never has to know which backend ran.  ``analyzer`` is the only
+    storage-conditional key: it is present only when interim results were
+    persisted (``store_interim=True`` with an ``output_path`` and the Rust
+    backend available).
+    """
+
+    portfolio_statistics: Dict[str, float]
+    sector_statistics: Dict[str, Dict[str, float]]
+    n_trials: int
+    n_assets: int
+    n_sectors: int
+    sector_names: List[str]
+    n_periods: int
+    period_length: float
+    time_horizon: float
+    analyzer: NotRequired[ParquetResultsAnalyzer]
+
+
 class TwoFactorPortfolio(BaseSimulator):
     """
     Two-factor portfolio loss simulation model.
@@ -213,10 +235,15 @@ class TwoFactorPortfolio(BaseSimulator):
             if not 0 <= corr <= 1:
                 raise ValueError("All intra_sector_correlations must be between 0 and 1")
 
+        # Require positive-definiteness (not merely PSD): the Rust backend's
+        # Cholesky rejects a singular matrix, so admitting one here would make the
+        # two backends diverge (Rust raises, NumPy repairs). Validating PD up
+        # front keeps the seam backend-independent and matches CorrelatedGBM /
+        # TimeVaryingCorrelatedGBM, which also require PD.
         validate_correlation_matrix_strict(
             self.sector_correlation_matrix,
             name="sector_correlation_matrix",
-            check_positive_definite=False,
+            check_positive_definite=True,
             pd_tolerance=CORRELATION_TOLERANCE,
         )
 
@@ -283,7 +310,7 @@ class TwoFactorPortfolio(BaseSimulator):
                  n_simulations: int,
                  n_periods: int = 1,
                  period_length: float = 1.0,
-                 storage_config: Optional[StorageConfig] = None) -> Dict[str, Any]:
+                 storage_config: Optional[StorageConfig] = None) -> "PortfolioResult":
         """
         Run portfolio loss simulation.
 
@@ -328,15 +355,15 @@ class TwoFactorPortfolio(BaseSimulator):
 
         store_interim = storage_config.store_interim if storage_config else False
         output_path = storage_config.output_path if storage_config else None
+        batch_size = storage_config.batch_size if storage_config else None
 
         if Backend.is_available():
             _rust = Backend.get_rust()
             rust_assets = [self._convert_asset_to_rust(asset) for asset in self.assets]
-            off_diag = self.sector_correlation_matrix[np.triu_indices(len(self.sector_names), 1)]
-            avg_inter_sector = float(np.mean(off_diag)) if off_diag.size > 0 else 0.0
 
+            # The full sector correlation matrix is the single source of truth for
+            # cross-sector coupling; no scalar summary rides the seam.
             rust_config = _rust.PortfolioConfig(
-                inter_sector_correlation=avg_inter_sector,
                 intra_sector_correlations=self.intra_sector_correlations,
                 systematic_lgd_correlation=self.systematic_lgd_correlation,
                 sector_names=self.sector_names,
@@ -352,7 +379,8 @@ class TwoFactorPortfolio(BaseSimulator):
                     period_length=period_length,
                     seed=self.config.seed,
                     store_interim=store_interim,
-                    output_path=output_path
+                    output_path=output_path,
+                    batch_size=batch_size,
                 )
             except RuntimeError as exc:
                 if store_interim:
@@ -372,7 +400,11 @@ class TwoFactorPortfolio(BaseSimulator):
                 period_length=period_length,
             )
 
-        # Add metadata
+        # Stamp the result contract uniformly so both backends return the same
+        # key set regardless of install state (see PortfolioResult).  n_trials is
+        # stamped here rather than read from a backend dict so it can never go
+        # missing on the NumPy fallback.
+        results['n_trials'] = n_simulations
         results['n_assets'] = len(self.assets)
         results['n_sectors'] = len(self.sector_names)
         results['sector_names'] = self.sector_names
@@ -462,10 +494,9 @@ class TwoFactorPortfolio(BaseSimulator):
 
         self._check_memory(n_simulations * n_periods * (n_sectors + 2 * n_assets))
 
-        try:
-            sector_cholesky = np.linalg.cholesky(self.sector_correlation_matrix)
-        except np.linalg.LinAlgError as exc:
-            raise ValueError("Inter-sector correlation matrix is not positive semi-definite") from exc
+        sector_cholesky = safe_cholesky(
+            self.sector_correlation_matrix, name="sector_correlation_matrix"
+        )
 
         asset_sector_ids = np.array([a.sector_id for a in self.assets])
         asset_lgd_means = np.array([a.lgd_mean for a in self.assets])

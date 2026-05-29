@@ -95,7 +95,6 @@ pub fn generate_correlated_normals(
 }
 
 pub struct TwoFactorCorrelationStructure {
-    pub inter_sector_correlation: f64,
     pub intra_sector_correlations: Vec<f64>,
     pub sector_sizes: Vec<usize>,
     sector_cholesky: Vec<Vec<f64>>,
@@ -103,7 +102,6 @@ pub struct TwoFactorCorrelationStructure {
 
 impl TwoFactorCorrelationStructure {
     pub fn new(
-        inter_sector_correlation: f64,
         intra_sector_correlations: Vec<f64>,
         sector_sizes: Vec<usize>,
         sector_correlation_matrix: Option<Vec<Vec<f64>>>,
@@ -141,7 +139,6 @@ impl TwoFactorCorrelationStructure {
         let sector_cholesky = cholesky_decomposition(sector_matrix)?;
 
         Ok(Self {
-            inter_sector_correlation,
             intra_sector_correlations,
             sector_sizes,
             sector_cholesky,

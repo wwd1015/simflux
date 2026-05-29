@@ -576,14 +576,17 @@ will be lower, but functionality remains intact.
 
 ## 5. Troubleshooting
 
-- **`TypeError: Can't instantiate abstract class SimulationEngine`**:
-  Ensure you are importing from the repository checkout or version
-  0.1.0+ that contains the `validate_inputs` shim.
 - **Performance seems slow**: Install the Rust-enabled wheel from PyPI or
   run `pip install maturin && maturin develop --release` to build locally.
-- **Need interim results**: Storage features require the compiled Rust
-  backend; the fallback will raise a `RuntimeError` if you request interim
-  output without it.
+- **Need interim results**: Interim Parquet storage requires the compiled Rust
+  backend. Without it, requesting `store_interim=True` emits a `RuntimeWarning`
+  and the simulation proceeds **without** persistence (it does not raise). A
+  `RuntimeError` is raised only when the Rust backend is present but its writer
+  fails.
+- **`ValueError: sector_correlation_matrix must be positive definite`**: the
+  sector correlation matrix must be strictly positive definite (a singular /
+  rank-deficient matrix — e.g. two perfectly correlated sectors — is rejected at
+  construction, identically on both backends).
 
 ---
 

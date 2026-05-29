@@ -96,7 +96,7 @@ fn py_simulate_gbm_time_varying_correlated(
 }
 
 #[pyfunction]
-#[pyo3(name = "simulate_portfolio", signature = (config, assets, n_simulations, n_periods=1, period_length=1.0, seed=None, store_interim=None, output_path=None))]
+#[pyo3(name = "simulate_portfolio", signature = (config, assets, n_simulations, n_periods=1, period_length=1.0, seed=None, store_interim=None, output_path=None, batch_size=None))]
 fn py_simulate_portfolio(
     py: Python<'_>,
     config: PortfolioConfig,
@@ -107,6 +107,7 @@ fn py_simulate_portfolio(
     seed: Option<u64>,
     store_interim: Option<bool>,
     output_path: Option<String>,
+    batch_size: Option<usize>,
 ) -> PyResult<PyObject> {
     let results = simulate_portfolio_losses(
         &config,
@@ -116,7 +117,8 @@ fn py_simulate_portfolio(
         period_length,
         seed,
         store_interim.unwrap_or(false),
-        output_path
+        output_path,
+        batch_size,
     );
 
     match results {

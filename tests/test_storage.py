@@ -16,22 +16,19 @@ class TestStorageIntegration:
         # Default config
         config = sf.StorageConfig()
         assert not config.store_interim
-        assert config.format == "parquet"
-        assert config.compression == "snappy"
+        assert config.output_path is None
+        assert config.batch_size == 10000
 
         # Custom config
         custom_config = sf.StorageConfig(
             store_interim=True,
-            store_losses=True,
-            format="parquet",
             output_path="test_output.parquet",
-            compression="gzip"
+            batch_size=2048,
         )
 
         assert custom_config.store_interim
-        assert custom_config.store_losses
         assert custom_config.output_path == "test_output.parquet"
-        assert custom_config.compression == "gzip"
+        assert custom_config.batch_size == 2048
 
     def test_portfolio_with_storage_config(self):
         """Test portfolio simulation with storage configuration."""
@@ -49,7 +46,6 @@ class TestStorageIntegration:
             storage_config = sf.StorageConfig(
                 store_interim=True,
                 output_path=output_path,
-                format="parquet"
             )
 
             # This might fail if storage is not fully implemented
@@ -102,17 +98,13 @@ class TestStorageIntegration:
 
     def test_storage_config_validation(self):
         """Test storage configuration validation."""
-        # Test invalid format
-        with pytest.raises(ValueError, match="format must be"):
-            sf.StorageConfig(format="invalid_format")
+        # Non-positive batch size is rejected
+        with pytest.raises(ValueError, match="batch_size must be positive"):
+            sf.StorageConfig(batch_size=0)
 
-        # Test invalid compression
-        with pytest.raises(ValueError, match="compression must be"):
-            sf.StorageConfig(compression="invalid_compression")
-
-        # Test missing output path when storing
+        # Missing output path when storing is allowed (may error at runtime)
         config = sf.StorageConfig(store_interim=True)
-        assert config.output_path is None  # Should be allowed, but might cause runtime error
+        assert config.output_path is None
 
     def test_storage_memory_efficiency(self):
         """Test that storage doesn't dramatically increase memory usage."""
@@ -173,34 +165,25 @@ class TestStorageIntegration:
         assert 'portfolio_statistics' in results_no_storage
         assert len(results_no_storage['portfolio_statistics']) > 0
 
-    @pytest.mark.parametrize("format_type", ["parquet"])  # Could add "hdf5" later
-    def test_storage_format_options(self, format_type):
-        """Test different storage format options."""
-        config = sf.StorageConfig(
-            store_interim=True,
-            format=format_type,
-            compression="snappy"
-        )
+    def test_storage_config_passthrough(self):
+        """Storage config (incl. batch_size) passes through to a simulation."""
+        config = sf.StorageConfig(store_interim=True, batch_size=4096)
+        assert config.batch_size == 4096
 
-        assert config.format == format_type
-        assert config.compression == "snappy"
-
-        # Test that config can be passed to portfolio
         portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
             n_assets_per_sector=[3, 3],
             sectors=['X', 'Y'],
             inter_sector_correlation=0.1
         )
 
-        # Should not raise during config validation
         with tempfile.TemporaryDirectory() as temp_dir:
-            config.output_path = os.path.join(temp_dir, f"test.{format_type}")
+            config.output_path = os.path.join(temp_dir, "test.parquet")
 
             try:
                 results = portfolio.simulate(n_simulations=10, storage_config=config)
                 assert 'portfolio_statistics' in results
             except RuntimeError as e:
                 if "Storage features require" in str(e):
-                    pytest.skip(f"{format_type} storage not available")
+                    pytest.skip("storage not available")
                 else:
                     raise
