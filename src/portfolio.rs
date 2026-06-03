@@ -132,6 +132,10 @@ impl AssetData {
 /// If the asset has a cumulative PD term structure, the forward PD for period
 /// `k` is `(cum[k] - cum[k-1]) / (1 - cum[k-1])`.  Otherwise a constant
 /// hazard rate is derived from the flat `pd` field spread across `n_periods`.
+///
+/// Retained as the documented forward-PD reference: it equals the `phi = 0`
+/// limit of the frailty barrier (calibrated Python-side); kept under test.
+#[allow(dead_code)]
 fn get_conditional_pd(asset: &AssetData, period: usize, n_periods: usize) -> f64 {
     if let Some(ref ts) = asset.pd_term_structure {
         if !ts.is_empty() {
@@ -156,6 +160,19 @@ fn get_conditional_pd(asset: &AssetData, period: usize, n_periods: usize) -> f64
     }
 }
 
+/// Cumulative PD by the end of `period` (0-indexed).  From the term structure
+/// directly when present, else from the flat `pd` under a constant hazard so the
+/// final period returns `pd` exactly.  Used by the "copula" default-timing model.
+fn cumulative_pd(asset: &AssetData, period: usize, n_periods: usize) -> f64 {
+    if let Some(ref ts) = asset.pd_term_structure {
+        if !ts.is_empty() {
+            let idx = period.min(ts.len() - 1);
+            return ts[idx].clamp(0.0, 1.0);
+        }
+    }
+    1.0 - (1.0 - asset.pd).powf((period as f64 + 1.0) / n_periods as f64)
+}
+
 // ---------------------------------------------------------------------------
 // Portfolio config
 // ---------------------------------------------------------------------------
@@ -165,8 +182,10 @@ fn get_conditional_pd(asset: &AssetData, period: usize, n_periods: usize) -> f64
 pub struct PortfolioConfig {
     #[pyo3(get, set)]
     pub intra_sector_correlations: Vec<f64>,
+    /// LGD-systematic correlation, one value per sector (parity with
+    /// `intra_sector_correlations`).
     #[pyo3(get, set)]
-    pub systematic_lgd_correlation: f64,
+    pub systematic_lgd_correlations: Vec<f64>,
     #[pyo3(get, set)]
     pub sector_names: Vec<String>,
     /// Full sector correlation matrix — the single source of truth for
@@ -178,16 +197,23 @@ pub struct PortfolioConfig {
 #[pymethods]
 impl PortfolioConfig {
     #[new]
-    #[pyo3(signature = (intra_sector_correlations, systematic_lgd_correlation, sector_names, sector_correlation_matrix=None))]
+    #[pyo3(signature = (intra_sector_correlations, systematic_lgd_correlations, sector_names, sector_correlation_matrix=None))]
     pub fn new(
         intra_sector_correlations: Vec<f64>,
-        systematic_lgd_correlation: f64,
+        systematic_lgd_correlations: Vec<f64>,
         sector_names: Vec<String>,
         sector_correlation_matrix: Option<Vec<Vec<f64>>>,
     ) -> PyResult<Self> {
-        if systematic_lgd_correlation.abs() > 1.0 {
+        for &corr in &systematic_lgd_correlations {
+            if corr.abs() > 1.0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Systematic LGD correlations must be between -1 and 1"
+                ));
+            }
+        }
+        if systematic_lgd_correlations.len() != sector_names.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Systematic LGD correlation must be between -1 and 1"
+                "Systematic LGD correlations and sector names must have same length"
             ));
         }
         for &corr in &intra_sector_correlations {
@@ -221,7 +247,7 @@ impl PortfolioConfig {
         }
         Ok(PortfolioConfig {
             intra_sector_correlations,
-            systematic_lgd_correlation, sector_names,
+            systematic_lgd_correlations, sector_names,
             sector_correlation_matrix: matrix,
         })
     }
@@ -308,6 +334,9 @@ pub fn simulate_portfolio_losses(
     n_simulations: usize,
     n_periods: usize,
     period_length: f64,
+    default_timing: &str,
+    factor_phi: f64,
+    barriers: &[Vec<f64>],
     seed: Option<u64>,
     store_interim: bool,
     output_path: Option<String>,
@@ -320,6 +349,28 @@ pub fn simulate_portfolio_losses(
     }
     if period_length <= 0.0 {
         return Err(PortfolioError::ConfigError("period_length must be positive".to_string()));
+    }
+    // "copula": single frozen latent vs cumulative thresholds (default times,
+    // Li 2000). "frailty": persistent AR(1) factor with fresh idiosyncratic and
+    // pre-calibrated barriers. Both reproduce the marginal term structure exactly.
+    let copula = match default_timing {
+        "copula" => true,
+        "frailty" => false,
+        other => return Err(PortfolioError::ConfigError(
+            format!("default_timing must be 'copula' or 'frailty', got '{}'", other))),
+    };
+    if !copula {
+        if barriers.len() != assets.len() {
+            return Err(PortfolioError::ConfigError(
+                "frailty mode requires one barrier row per asset".to_string()));
+        }
+        // Guard the inner dimension too: simulate_single_trial indexes
+        // barriers[idx][period] for period in 0..n_periods, so a too-short row
+        // would panic across the FFI boundary instead of erroring cleanly.
+        if barriers.iter().any(|row| row.len() < n_periods) {
+            return Err(PortfolioError::ConfigError(
+                "frailty mode requires n_periods barriers per asset".to_string()));
+        }
     }
 
     // Group assets by sector
@@ -338,14 +389,33 @@ pub fn simulate_portfolio_losses(
         Some(config.sector_correlation_matrix.clone()),
     ).map_err(|e| PortfolioError::ConfigError(e.to_string()))?;
 
-    // Generate systematic factors: one independent set per period.
-    // factors[period][trial] — each period has its own economic shock.
-    let all_factors: Vec<Vec<SystematicFactors>> = (0..n_periods)
+    // Generate systematic factors.  The "copula" model freezes a single set
+    // across the horizon (one generated); "frailty" draws an independent
+    // innovation set per period and then couples them with AR(1) persistence.
+    // factors[period][trial].
+    let n_factor_sets = if copula { 1 } else { n_periods };
+    let mut all_factors: Vec<Vec<SystematicFactors>> = (0..n_factor_sets)
         .map(|period| {
             let period_seed = seed.map(|s| s.wrapping_add((period * n_simulations + 1_000_000) as u64));
             correlation_structure.generate_factors(n_simulations, period_seed)
         })
         .collect();
+
+    // Frailty AR(1): F_k = phi*F_{k-1} + sqrt(1-phi^2)*innovation_k, applied to
+    // the pre-generated independent innovations.  Each F_k stays N(0, Sigma).
+    if !copula && factor_phi > 0.0 && n_periods > 1 {
+        let sqrt_innov = (1.0 - factor_phi * factor_phi).max(0.0).sqrt();
+        let n_sectors = config.sector_names.len();
+        for trial in 0..n_simulations {
+            for period in 1..n_periods {
+                for s in 0..n_sectors {
+                    let prev = all_factors[period - 1][trial].sector_factors[s];
+                    let innov = all_factors[period][trial].sector_factors[s];
+                    all_factors[period][trial].sector_factors[s] = factor_phi * prev + sqrt_innov * innov;
+                }
+            }
+        }
+    }
 
     // Run simulations in parallel
     let trial_results: Vec<TrialResult> = (0..n_simulations)
@@ -353,8 +423,8 @@ pub fn simulate_portfolio_losses(
         .map(|trial_id| {
             simulate_single_trial(
                 trial_id, config, assets,
-                &correlation_structure, &all_factors,
-                n_periods, period_length, seed,
+                &correlation_structure, &all_factors, barriers,
+                n_periods, period_length, copula, seed,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -398,8 +468,10 @@ fn simulate_single_trial(
     assets: &[AssetData],
     correlation_structure: &TwoFactorCorrelationStructure,
     all_factors: &[Vec<SystematicFactors>],  // [period][trial]
+    barriers: &[Vec<f64>],                    // [asset][period], frailty only
     n_periods: usize,
     period_length: f64,
+    copula: bool,
     seed: Option<u64>,
 ) -> Result<TrialResult, PortfolioError> {
     let mut rng = create_rng(seed, trial_id as u64);
@@ -414,6 +486,47 @@ fn simulate_single_trial(
     let mut factor_global = vec![0.0_f64; n_assets];
     let mut factor_sector = vec![0.0_f64; n_assets];
 
+    if copula {
+        // One-factor Gaussian copula of default times: a single frozen latent
+        // per obligor vs the cumulative-PD staircase; default = first crossing.
+        let factors = &all_factors[0][trial_id];
+        for (idx, asset) in assets.iter().enumerate() {
+            let sector_index = asset.sector_id as usize;
+            let sector_factor = factors.get_sector_factor(sector_index);
+
+            let intra_corr = correlation_structure.intra_sector_correlations[sector_index];
+            let sector_loading = intra_corr.sqrt();
+            let idio_loading = (1.0 - intra_corr).max(0.0).sqrt();
+            let idio = sample_standard_normal(&mut rng);
+
+            let value = sector_loading * sector_factor + idio_loading * idio;
+            asset_values[idx] = value;
+            factor_global[idx] = sector_factor;
+            factor_sector[idx] = sector_factor;
+
+            let threshold_final = calculate_default_threshold(cumulative_pd(asset, n_periods - 1, n_periods));
+            if value <= threshold_final {
+                defaulted[idx] = true;
+                // Default period = first k whose cumulative threshold is crossed.
+                let mut dperiod = n_periods - 1;
+                for k in 0..n_periods {
+                    if value <= calculate_default_threshold(cumulative_pd(asset, k, n_periods)) {
+                        dperiod = k;
+                        break;
+                    }
+                }
+                default_time[idx] = Some((dperiod as f64 + 1.0) * period_length);
+
+                let lgd_corr = config.systematic_lgd_correlations[sector_index];
+                match compute_loss(asset, sector_factor, lgd_corr, &mut rng) {
+                    Ok((loss, recovery)) => { loss_amounts[idx] = loss; recovery_rates[idx] = recovery; }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    } else {
+    // Frailty: persistent (already AR(1)-coupled) factor, fresh idiosyncratic
+    // each period, first-passage against the pre-calibrated per-period barriers.
     for period in 0..n_periods {
         let factors = &all_factors[period][trial_id];
 
@@ -435,15 +548,14 @@ fn simulate_single_trial(
             factor_global[idx] = sector_factor;
             factor_sector[idx] = sector_factor;
 
-            let cond_pd = get_conditional_pd(asset, period, n_periods);
-            let threshold = calculate_default_threshold(cond_pd);
+            let threshold = barriers[idx][period];
 
             if value <= threshold {
                 defaulted[idx] = true;
                 default_time[idx] = Some((period as f64 + 1.0) * period_length);
 
-                // Compute LGD using this period's sector factor
-                match compute_loss(asset, sector_factor, config.systematic_lgd_correlation, &mut rng) {
+                let lgd_corr = config.systematic_lgd_correlations[sector_index];
+                match compute_loss(asset, sector_factor, lgd_corr, &mut rng) {
                     Ok((loss, recovery)) => {
                         loss_amounts[idx] = loss;
                         recovery_rates[idx] = recovery;
@@ -452,6 +564,7 @@ fn simulate_single_trial(
                 }
             }
         }
+    }
     }
 
     // Build results
@@ -500,7 +613,11 @@ fn compute_loss(
     let (alpha, beta) = asset.get_lgd_beta_params()
         .map_err(|e| PortfolioError::SimulationError(e.to_string()))?;
 
-    let lgd_sys = systematic_lgd_correlation * sector_factor;
+    // Wrong-way risk: a downturn is a LOW sector factor (defaults fire in the
+    // low tail of the latent value), so LGD must load on the NEGATIVE of the
+    // factor for a positive `systematic_lgd_correlation` to mean "recoveries
+    // fall — LGD rises — exactly when defaults cluster".
+    let lgd_sys = -systematic_lgd_correlation * sector_factor;
     let lgd_idio = (1.0 - systematic_lgd_correlation.powi(2)).max(0.0).sqrt()
         * sample_standard_normal(rng);
     let lgd_normal = lgd_sys + lgd_idio;
@@ -596,10 +713,11 @@ mod tests {
     #[test]
     fn test_portfolio_config_creation() {
         let config = PortfolioConfig::new(
-            vec![0.4, 0.3], 0.1,
+            vec![0.4, 0.3], vec![0.1, 0.1],
             vec!["Tech".to_string(), "Finance".to_string()],
             Some(vec![vec![1.0, 0.2], vec![0.2, 1.0]]),
         ).unwrap();
         assert_eq!(config.intra_sector_correlations.len(), 2);
+        assert_eq!(config.systematic_lgd_correlations.len(), 2);
     }
 }

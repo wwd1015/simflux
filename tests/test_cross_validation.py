@@ -4,6 +4,14 @@ These tests run both backends on the same problem and verify that the
 distributional statistics converge to the same values.  Because each backend
 uses a different RNG stream, individual paths differ — but with enough
 samples the means and variances should agree within Monte Carlo tolerance.
+
+SCOPE: this file proves *parity* (the two backends agree), not *correctness*.
+A wrong formula shared by both backends passes every assertion here because the
+backends still agree with each other.  Model correctness is pinned against
+external truth elsewhere: ``test_analytic_vasicek.py`` (ASRF closed form),
+``test_behavioral_invariants.py`` (economic invariants), and
+``test_lgd_wrong_way.py`` (wrong-way risk sign).  See the
+``TestConditionalPDDeterministic`` class below for the deterministic PD pins.
 """
 
 import pytest

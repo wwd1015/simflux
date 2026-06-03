@@ -62,7 +62,15 @@ User API → Simulator class → validate_inputs() → SimulationEngine
 - Tests mock via `@patch.object(Backend, 'is_available', ...)` and `@patch.object(Backend, 'get_rust')`; cross-validation forces the NumPy backend through the **public** seam under these patches (never private `_numpy_*` methods)
 
 ## Dual-Implementation & Cross-Validation
-Every simulation type has both a Rust and NumPy implementation. Cross-validation tests in `tests/test_cross_validation.py` run both backends on the same problem and compare distributional statistics — portfolio runs compare `var_95`/per-sector means (tightened to `var_99` when scipy is present), and the shared conditional-PD derivation is pinned with exact, deterministic checks. This strategy catches bugs in either backend and ensures the NumPy fallback remains a reliable failsafe.
+Every simulation type has both a Rust and NumPy implementation. Cross-validation tests in `tests/test_cross_validation.py` run both backends on the same problem and compare distributional statistics — portfolio runs compare `var_95`/per-sector means (tightened to `var_99` when scipy is present), and the shared conditional-PD derivation is pinned with exact, deterministic checks.
+
+**What cross-validation does and does not prove.** It guards *parity* — that the two backends agree — so it catches one backend *diverging* from the other (e.g. a Cholesky mismatch). It is **blind to errors in logic the two backends share**: a wrong formula present in both passes every cross-check because they agree with each other. Model *correctness* is therefore pinned separately, against external truth, by:
+- `tests/test_analytic_vasicek.py` — the homogeneous single-sector limit must match the Vasicek/Basel-ASRF closed form.
+- `tests/test_behavioral_invariants.py` — marginal loss = PD·LGD, tail risk monotone in correlation, coherent risk-measure ordering.
+- `tests/test_lgd_wrong_way.py` — a positive systematic LGD correlation must *raise* loss (wrong-way risk).
+- `TestConditionalPDDeterministic` — exact closed-form PD wiring, no MC.
+
+When adding a model behaviour, add a behavioural/analytic test for it — do **not** rely on cross-validation to catch a model bug, only a backend-divergence bug. (Both v0.2.0-era model bugs — a phantom "global factor" and an inverted LGD sign — were shared by both backends and so passed cross-validation; behavioural tests catch that class.)
 
 ## Dependencies
 - Python: numpy>=2.2, pandas>=3.0, polars>=1.38, pyarrow>=18.0, scipy (optional)

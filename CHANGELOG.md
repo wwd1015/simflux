@@ -4,6 +4,57 @@ All notable changes to SimFlux are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/); while pre-1.0, minor versions may
 contain breaking changes.
 
+## [Unreleased]
+
+### Fixed
+
+- **Wrong-way LGD sign corrected.** The systematic LGD coupling loaded on the
+  sector factor with the wrong sign, so a *positive* `systematic_lgd_correlation`
+  produced *lower* LGD in downturns (benign "right-way" risk) — the opposite of
+  the documented intent and of credit-risk reality. LGD now loads on the negative
+  of the sector factor, so a positive correlation raises LGD exactly when defaults
+  cluster. Fixed identically in the Rust backend and the NumPy fallback; covered
+  by a behavioral guard (`tests/test_lgd_wrong_way.py`) that pins the economics,
+  which cross-validation structurally could not (both backends shared the sign).
+
+### Added
+
+- **Per-sector `systematic_lgd_correlation`.** In addition to a scalar, the
+  `TwoFactorPortfolio` constructor now accepts a per-sector list, a
+  `{sector: value}` dict (missing sectors default to 0.3), or the sentinel
+  `"match_intra"`, which sets `ρ_lgd_s = √ρ_intra_s` so LGD's cycle-sensitivity
+  matches the default driver's, sector by sector. See methodology §2.10.
+- **`default_timing` multi-period model selector** on `simulate()`, with two
+  models that both reproduce the marginal cumulative PD exactly and coincide at
+  `n_periods=1`:
+  - `"copula"` (default) — one-factor Gaussian copula of default times (Li 2000):
+    a single latent per obligor vs the cumulative-PD staircase; grid-invariant
+    loss distribution.
+  - `"frailty"` — dynamic frailty (Duffie et al. 2009): a persistent AR(1)
+    systematic factor (`factor_persistence`, annual autocorrelation, default 0.5)
+    with fresh idiosyncratic shocks each period and a **calibrated per-period
+    barrier** that preserves the marginal PD for any persistence. New module
+    `simflux.portfolio.frailty` (`calibrate_barriers`, `survival_curve`,
+    `per_period_phi`). See methodology §2.6 and `docs/adr/0002`.
+- **`docs/adr/0001`** records the scenario-agnostic (no macro/CCAR conditioning)
+  design decision; methodology §2.10–2.11 position the LGD model against industry.
+
+### Breaking changes
+
+- **Multi-period default timing now defaults to `"copula"`** (was the implicit
+  independent per-period model). Multi-period (`n_periods > 1`) tail numbers
+  change: the copula loss distribution is grid-invariant. The prior
+  independent-period behavior is the `factor_persistence=0` limit of
+  `default_timing="frailty"`. `n_periods=1` is unaffected (the models coincide).
+- **Rust seam: `simulate_portfolio` takes `default_timing: str`, `factor_phi: f64`,
+  and `barriers: Vec<Vec<f64>>`** (calibrated barriers are computed in Python and
+  passed to the backend) in place of the implicit per-period independence.
+- **Rust seam: `PortfolioConfig` takes `systematic_lgd_correlations: Vec<f64>`**
+  (one value per sector) instead of the scalar `systematic_lgd_correlation: f64`.
+  The Python `TwoFactorPortfolio` API is backward compatible — a scalar still
+  works, and `.systematic_lgd_correlation` still reads back as a scalar when
+  uniform (the canonical attribute is now `.systematic_lgd_correlations`).
+
 ## [0.2.0] — 2026-05-28
 
 This release sharpens the seam **between** the Rust and NumPy backends rather

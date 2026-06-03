@@ -96,7 +96,7 @@ fn py_simulate_gbm_time_varying_correlated(
 }
 
 #[pyfunction]
-#[pyo3(name = "simulate_portfolio", signature = (config, assets, n_simulations, n_periods=1, period_length=1.0, seed=None, store_interim=None, output_path=None, batch_size=None))]
+#[pyo3(name = "simulate_portfolio", signature = (config, assets, n_simulations, n_periods=1, period_length=1.0, default_timing="copula".to_string(), factor_phi=0.0, barriers=Vec::new(), seed=None, store_interim=None, output_path=None, batch_size=None))]
 fn py_simulate_portfolio(
     py: Python<'_>,
     config: PortfolioConfig,
@@ -104,6 +104,9 @@ fn py_simulate_portfolio(
     n_simulations: usize,
     n_periods: usize,
     period_length: f64,
+    default_timing: String,
+    factor_phi: f64,
+    barriers: Vec<Vec<f64>>,
     seed: Option<u64>,
     store_interim: Option<bool>,
     output_path: Option<String>,
@@ -115,6 +118,9 @@ fn py_simulate_portfolio(
         n_simulations,
         n_periods,
         period_length,
+        &default_timing,
+        factor_phi,
+        &barriers,
         seed,
         store_interim.unwrap_or(false),
         output_path,

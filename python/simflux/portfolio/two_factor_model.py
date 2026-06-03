@@ -157,6 +157,8 @@ class PortfolioResult(TypedDict):
     n_periods: int
     period_length: float
     time_horizon: float
+    default_timing: str
+    factor_persistence: Optional[float]
     analyzer: NotRequired[ParquetResultsAnalyzer]
 
 
@@ -175,8 +177,16 @@ class TwoFactorPortfolio(BaseSimulator):
                  assets: Union[List[AssetData], pd.DataFrame],
                  intra_sector_correlations: Optional[Union[float, Dict[str, float]]] = None,
                  sector_correlation_matrix: Optional[Union[np.ndarray, List[List[float]]]] = None,
-                 systematic_lgd_correlation: float = 0.3,
+                 systematic_lgd_correlation: Union[float, List[float], Dict[str, float], str] = 0.3,
                  config: Optional[SimulationConfig] = None) -> None:
+        """Construct a two-factor credit portfolio.
+
+        ``systematic_lgd_correlation`` accepts, in addition to a scalar:
+        a per-sector ``list``, a ``{sector_name: value}`` ``dict`` (missing
+        sectors default to 0.3), or the string ``"match_intra"`` — which sets
+        ``rho_lgd_s = sqrt(rho_intra_s)`` per sector so LGD's cycle-sensitivity
+        matches the default driver's (see methodology §2.10).
+        """
         super().__init__(config)
 
         if not Backend.is_available():
@@ -204,8 +214,6 @@ class TwoFactorPortfolio(BaseSimulator):
             asset.sector_id = self.sector_mapping[asset.sector_name]
 
         # Process correlation inputs
-        self.systematic_lgd_correlation = systematic_lgd_correlation
-
         if intra_sector_correlations is None:
             inferred_intra = self._infer_intra_correlations_from_assets()
             if inferred_intra is not None:
@@ -222,14 +230,70 @@ class TwoFactorPortfolio(BaseSimulator):
         else:
             raise ValueError("intra_sector_correlations must be float or dict")
 
+        # Resolve LGD-systematic correlation to one value per sector.  Must run
+        # after intra_sector_correlations, because "match_intra" reads them.
+        self.systematic_lgd_correlations = self._resolve_systematic_lgd_correlations(
+            systematic_lgd_correlation
+        )
+
         self.sector_correlation_matrix = self._prepare_sector_correlation_matrix(sector_correlation_matrix)
 
         self.validate_inputs()
 
+    @property
+    def systematic_lgd_correlation(self) -> Union[float, List[float]]:
+        """Backward-compatible scalar view of the per-sector LGD correlation.
+
+        Returns the single value when it is uniform across sectors (the common
+        case), otherwise the full per-sector list.  The canonical attribute is
+        ``systematic_lgd_correlations`` (plural).
+        """
+        vals = self.systematic_lgd_correlations
+        first = vals[0]
+        if all(v == first for v in vals):
+            return first
+        return list(vals)
+
+    def _resolve_systematic_lgd_correlations(
+        self, raw: Union[float, List[float], Dict[str, float], str]
+    ) -> List[float]:
+        """Resolve the LGD-systematic correlation input to one value per sector.
+
+        Accepts a scalar (broadcast), a per-sector list, a ``{sector: value}``
+        dict (missing sectors default to 0.3), or ``"match_intra"`` which sets
+        ``rho_lgd_s = sqrt(rho_intra_s)`` so LGD's cycle-sensitivity equals the
+        default driver's, sector by sector.
+        """
+        n = len(self.sector_names)
+        if isinstance(raw, str):
+            if raw != "match_intra":
+                raise ValueError(
+                    f"systematic_lgd_correlation string must be 'match_intra', got {raw!r}"
+                )
+            return [float(np.sqrt(max(0.0, c))) for c in self.intra_sector_correlations]
+        if isinstance(raw, bool):
+            raise ValueError("systematic_lgd_correlation must be numeric, not bool")
+        if isinstance(raw, (int, float)):
+            return [float(raw)] * n
+        if isinstance(raw, dict):
+            return [float(raw.get(sector, 0.3)) for sector in self.sector_names]
+        if isinstance(raw, (list, tuple, np.ndarray)):
+            vals = [float(v) for v in raw]
+            if len(vals) != n:
+                raise ValueError(
+                    "systematic_lgd_correlation list must have one value per "
+                    f"sector ({n}), got {len(vals)}"
+                )
+            return vals
+        raise ValueError(
+            "systematic_lgd_correlation must be a float, list, dict, or 'match_intra'"
+        )
+
     def validate_inputs(self) -> None:
         """Validate portfolio configuration."""
-        if not -1 <= self.systematic_lgd_correlation <= 1:
-            raise ValueError("systematic_lgd_correlation must be between -1 and 1")
+        for corr in self.systematic_lgd_correlations:
+            if not -1 <= corr <= 1:
+                raise ValueError("systematic_lgd_correlation must be between -1 and 1")
 
         for corr in self.intra_sector_correlations:
             if not 0 <= corr <= 1:
@@ -310,6 +374,8 @@ class TwoFactorPortfolio(BaseSimulator):
                  n_simulations: int,
                  n_periods: int = 1,
                  period_length: float = 1.0,
+                 default_timing: str = "copula",
+                 factor_persistence: float = 0.5,
                  storage_config: Optional[StorageConfig] = None) -> "PortfolioResult":
         """
         Run portfolio loss simulation.
@@ -319,14 +385,45 @@ class TwoFactorPortfolio(BaseSimulator):
         n_simulations : int
             Number of Monte Carlo simulations.
         n_periods : int, default=1
-            Number of discrete time periods.  Each period gets independent
-            sector factor draws; an asset can default at most once across
-            all periods.  ``n_periods=1`` reproduces the classic single-period
-            model.  For quarterly simulation over 2 years use ``n_periods=8``.
+            Number of discrete time periods.  An asset can default at most once
+            across all periods.  ``n_periods=1`` reproduces the classic
+            single-period model.  For quarterly simulation over 2 years use
+            ``n_periods=8``.
         period_length : float, default=1.0
             Length of each period in years.  ``period_length=0.25`` for
             quarterly steps.  The total time horizon is
             ``n_periods * period_length``.
+        default_timing : {"copula", "frailty"}, default="copula"
+            How default *timing* is generated across periods (no effect when
+            ``n_periods == 1``, where the two coincide).  Both reproduce the
+            marginal cumulative PD term structure exactly; they differ in the
+            cross-period dependence of the systematic factor, and therefore in
+            the tail.
+
+            * ``"copula"`` — one-factor Gaussian copula of default *times*
+              (Li, 2000).  A single latent ``V = sqrt(rho)*F + sqrt(1-rho)*eps``
+              is drawn per obligor for the whole horizon and compared against the
+              *cumulative* threshold staircase ``tau_k = Phi^{-1}(cum_k)``;
+              default is the first crossing.  All uncertainty resolves at t=0
+              (maximal cross-period dependence; grid-invariant loss distribution).
+            * ``"frailty"`` — dynamic frailty (Duffie et al., 2009).  The
+              systematic factor is *persistent* (an AR(1) with annual
+              autocorrelation ``factor_persistence``), and fresh idiosyncratic
+              shocks arrive each period; defaults are conditionally independent
+              given the factor path.  The per-period default *barrier* is
+              calibrated so the marginal PD is preserved for any persistence (a
+              naive AR(1) on forward thresholds would bias it).  ``factor_persistence
+              = 0`` reduces to independent periods; ``= 1`` freezes the factor.
+
+            See methodology §2.6.
+        factor_persistence : float, default=0.5
+            **Frailty mode only.** Annual autocorrelation of the systematic
+            credit-cycle factor, in ``[0, 1]``; the per-period AR(1) coefficient
+            is ``factor_persistence ** period_length``.  The default ``0.5`` is a
+            cycle-realistic *illustrative* value — for production use, calibrate
+            it to data (e.g. an AR(1) fit to a probit-transformed default-rate
+            series); typical annual estimates are ~0.4–0.7.  Ignored by
+            ``"copula"``.
         storage_config : StorageConfig, optional
             Configuration for storing interim results.
 
@@ -337,14 +434,11 @@ class TwoFactorPortfolio(BaseSimulator):
 
         Notes
         -----
-        When ``n_periods > 1`` the per-period conditional PD is derived
-        automatically:
-
-        * If an asset has ``pd_term_structure`` (cumulative PDs at each period
-          end) the forward PD for each period is computed as
-          ``(cum[k] - cum[k-1]) / (1 - cum[k-1])``.
-        * Otherwise the flat ``pd`` field is spread across all periods assuming
-          a constant hazard rate: ``1 - (1 - pd)^(1/n_periods)``.
+        The cumulative PD at each period end comes from the asset's
+        ``pd_term_structure`` when provided, else from the flat ``pd`` under a
+        constant hazard (``cum_k = 1 - (1 - pd)^((k+1)/n_periods)``).  ``"copula"``
+        thresholds the cumulative directly; ``"frailty"`` calibrates a barrier per
+        period (see :mod:`simflux.portfolio.frailty`).
         """
         if n_simulations <= 0:
             raise ValueError("n_simulations must be positive")
@@ -352,6 +446,38 @@ class TwoFactorPortfolio(BaseSimulator):
             raise ValueError("n_periods must be positive")
         if period_length <= 0:
             raise ValueError("period_length must be positive")
+        if default_timing not in ("copula", "frailty"):
+            raise ValueError("default_timing must be 'copula' or 'frailty'")
+        if not 0.0 <= factor_persistence <= 1.0:
+            raise ValueError("factor_persistence must be between 0 and 1")
+
+        # A pd_term_structure whose length disagrees with n_periods is silently
+        # clamped (extra points dropped; short ones repeat their last value), so
+        # warn rather than let the realized horizon PD differ from intent.
+        for a in self.assets:
+            if a.pd_term_structure is not None and len(a.pd_term_structure) != n_periods:
+                warnings.warn(
+                    f"pd_term_structure length ({len(a.pd_term_structure)}) != n_periods "
+                    f"({n_periods}); extra points are ignored and short structures repeat "
+                    "their last value. The horizon PD used is cum[min(n_periods-1, len-1)].",
+                    RuntimeWarning,
+                )
+                break
+
+        # Frailty mode: calibrate the per-period default barriers up front (once,
+        # shared by whichever backend runs) so the marginal PD is preserved.
+        factor_phi = 0.0
+        barriers = None
+        if default_timing == "frailty":
+            from .frailty import per_period_phi, barrier_matrix
+            factor_phi = per_period_phi(factor_persistence, period_length) if n_periods > 1 else 0.0
+            cum_matrix = np.stack(
+                [self._get_cumulative_pds(k, n_periods) for k in range(n_periods)]
+            )
+            asset_rhos = np.array(self.intra_sector_correlations)[
+                np.array([a.sector_id for a in self.assets])
+            ]
+            barriers = barrier_matrix(cum_matrix, asset_rhos, factor_phi)
 
         store_interim = storage_config.store_interim if storage_config else False
         output_path = storage_config.output_path if storage_config else None
@@ -365,7 +491,7 @@ class TwoFactorPortfolio(BaseSimulator):
             # cross-sector coupling; no scalar summary rides the seam.
             rust_config = _rust.PortfolioConfig(
                 intra_sector_correlations=self.intra_sector_correlations,
-                systematic_lgd_correlation=self.systematic_lgd_correlation,
+                systematic_lgd_correlations=self.systematic_lgd_correlations,
                 sector_names=self.sector_names,
                 sector_correlation_matrix=self.sector_correlation_matrix.tolist(),
             )
@@ -377,6 +503,9 @@ class TwoFactorPortfolio(BaseSimulator):
                     n_simulations=n_simulations,
                     n_periods=n_periods,
                     period_length=period_length,
+                    default_timing=default_timing,
+                    factor_phi=factor_phi,
+                    barriers=(barriers.T.tolist() if barriers is not None else []),
                     seed=self.config.seed,
                     store_interim=store_interim,
                     output_path=output_path,
@@ -398,6 +527,9 @@ class TwoFactorPortfolio(BaseSimulator):
                 n_simulations=n_simulations,
                 n_periods=n_periods,
                 period_length=period_length,
+                default_timing=default_timing,
+                factor_phi=factor_phi,
+                barriers=barriers,
             )
 
         # Stamp the result contract uniformly so both backends return the same
@@ -411,6 +543,8 @@ class TwoFactorPortfolio(BaseSimulator):
         results['n_periods'] = n_periods
         results['period_length'] = period_length
         results['time_horizon'] = n_periods * period_length
+        results['default_timing'] = default_timing
+        results['factor_persistence'] = factor_persistence if default_timing == "frailty" else None
 
         # Create analyzer if interim data is available
         if store_interim and output_path and Backend.is_available():
@@ -455,7 +589,7 @@ class TwoFactorPortfolio(BaseSimulator):
         return 1.0 - (1.0 - pd) ** (1.0 / n_periods)
 
     def _get_conditional_pds(self, period: int, n_periods: int) -> np.ndarray:
-        """Return an array of per-asset conditional PDs for a given period."""
+        """Return an array of per-asset conditional (forward) PDs for a period."""
         result = np.empty(len(self.assets))
         for i, a in enumerate(self.assets):
             if a.pd_term_structure is not None and len(a.pd_term_structure) > 0:
@@ -464,13 +598,37 @@ class TwoFactorPortfolio(BaseSimulator):
                 result[i] = self._conditional_pd_flat(a.pd, n_periods)
         return result
 
+    @staticmethod
+    def _cumulative_pd_from_term_structure(ts: List[float], period: int) -> float:
+        idx = min(period, len(ts) - 1)
+        return max(0.0, min(1.0, ts[idx]))
+
+    @staticmethod
+    def _cumulative_pd_flat(pd: float, n_periods: int, period: int) -> float:
+        # Cumulative PD by the end of period ``period`` (0-indexed) under a
+        # constant hazard, so that the final period returns ``pd`` exactly.
+        return 1.0 - (1.0 - pd) ** ((period + 1) / n_periods)
+
+    def _get_cumulative_pds(self, period: int, n_periods: int) -> np.ndarray:
+        """Return an array of per-asset *cumulative* PDs by a period's end."""
+        result = np.empty(len(self.assets))
+        for i, a in enumerate(self.assets):
+            if a.pd_term_structure is not None and len(a.pd_term_structure) > 0:
+                result[i] = self._cumulative_pd_from_term_structure(a.pd_term_structure, period)
+            else:
+                result[i] = self._cumulative_pd_flat(a.pd, n_periods, period)
+        return result
+
     # ------------------------------------------------------------------
     # NumPy fallback
     # ------------------------------------------------------------------
 
     def _fallback_simulate_portfolio(self, n_simulations: int,
                                      n_periods: int = 1,
-                                     period_length: float = 1.0) -> Dict[str, Any]:
+                                     period_length: float = 1.0,
+                                     default_timing: str = "copula",
+                                     factor_phi: float = 0.0,
+                                     barriers: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """Fallback portfolio simulation using vectorized NumPy (no Rust)."""
         try:
             from scipy import stats as scipy_stats
@@ -508,48 +666,81 @@ class TwoFactorPortfolio(BaseSimulator):
         sector_loadings = np.sqrt(asset_intra_corrs)
         idio_loadings = np.sqrt(np.maximum(0.0, 1 - asset_intra_corrs))
 
+        # Per-sector LGD-systematic correlation, expanded to one value per asset.
+        asset_lgd_corrs = np.array(self.systematic_lgd_correlations)[asset_sector_ids]
+        lgd_idio_scale = np.sqrt(np.maximum(0.0, 1 - asset_lgd_corrs ** 2))
+
         lgd_alpha = asset_lgd_means * ((asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1)
         lgd_beta_param = (1 - asset_lgd_means) * ((asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1)
 
-        # Track per-simulation, per-asset state
-        ever_defaulted = np.zeros((n_simulations, n_assets), dtype=bool)
+        def _lgd_from_normal(lgd_normal: np.ndarray) -> np.ndarray:
+            """Map a standard-normal LGD driver through the Gaussian copula to a
+            Beta-distributed realized LGD (uniform-clipped when scipy absent)."""
+            lgd_uniform = np.clip(0.5 * (1 + erf_func(lgd_normal / np.sqrt(2))), 1e-12, 1 - 1e-12)
+            if beta_ppf is not None:
+                return beta_ppf(lgd_uniform, lgd_alpha[np.newaxis, :], lgd_beta_param[np.newaxis, :])
+            return np.clip(lgd_uniform, 1e-3, 1 - 1e-3)
+
         losses = np.zeros((n_simulations, n_assets))
 
-        for period in range(n_periods):
-            cond_pds = self._get_conditional_pds(period, n_periods)
-            thresholds = norm_ppf(cond_pds)
+        if default_timing == "copula":
+            # One-factor Gaussian copula of default *times* (Li, 2000): a single
+            # latent V per obligor for the whole horizon, thresholded against the
+            # cumulative PD.  Default by horizon <=> V <= Phi^{-1}(cum_final); the
+            # marginal cumulative PD is reproduced exactly for any correlation.
+            cum_final = self._get_cumulative_pds(n_periods - 1, n_periods)
+            final_threshold = norm_ppf(cum_final)
 
-            # Independent sector factors per period
-            independent = rng.normal(size=(n_simulations, n_sectors))
-            sector_factor_all = independent @ sector_cholesky.T
+            sector_factor_all = rng.normal(size=(n_simulations, n_sectors)) @ sector_cholesky.T
             asset_sector_factors = sector_factor_all[:, asset_sector_ids]
-
             idiosyncratic = rng.normal(size=(n_simulations, n_assets))
-            asset_values = (
+            latent = (
                 sector_loadings[np.newaxis, :] * asset_sector_factors +
                 idio_loadings[np.newaxis, :] * idiosyncratic
             )
+            defaulted = latent <= final_threshold[np.newaxis, :]
 
-            # Default check: only for surviving assets
-            new_defaults = (asset_values <= thresholds[np.newaxis, :]) & ~ever_defaulted
-
-            if np.any(new_defaults):
-                # Compute LGD for newly defaulted assets
-                lgd_sys = self.systematic_lgd_correlation * asset_sector_factors
-                lgd_idio_scale = max(0.0, 1 - self.systematic_lgd_correlation ** 2) ** 0.5
-                lgd_idio = lgd_idio_scale * rng.normal(size=(n_simulations, n_assets))
-                lgd_normal = lgd_sys + lgd_idio
-                lgd_uniform = np.clip(0.5 * (1 + erf_func(lgd_normal / np.sqrt(2))), 1e-12, 1 - 1e-12)
-
-                if beta_ppf is not None:
-                    lgd_realized = beta_ppf(lgd_uniform, lgd_alpha[np.newaxis, :], lgd_beta_param[np.newaxis, :])
+            if np.any(defaulted):
+                lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
+                lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(size=(n_simulations, n_assets))
+                lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
+                losses = np.where(defaulted, lgd_realized * asset_exposures[np.newaxis, :], 0.0)
+        else:
+            # Dynamic frailty: a persistent (AR(1)) systematic factor with fresh
+            # idiosyncratic shocks each period; first-passage against the
+            # pre-calibrated barriers (which preserve the marginal PD for any phi).
+            sqrt_innov = (max(0.0, 1.0 - factor_phi ** 2)) ** 0.5
+            prev_factor: Optional[np.ndarray] = None
+            ever_defaulted = np.zeros((n_simulations, n_assets), dtype=bool)
+            for period in range(n_periods):
+                innovation = rng.normal(size=(n_simulations, n_sectors)) @ sector_cholesky.T
+                if prev_factor is None:
+                    sector_factor_all = innovation
                 else:
-                    lgd_realized = np.clip(lgd_uniform, 1e-3, 1 - 1e-3)
+                    sector_factor_all = factor_phi * prev_factor + sqrt_innov * innovation
+                prev_factor = sector_factor_all
+                asset_sector_factors = sector_factor_all[:, asset_sector_ids]
 
-                period_losses = lgd_realized * asset_exposures[np.newaxis, :]
-                losses = np.where(new_defaults, period_losses, losses)
+                idiosyncratic = rng.normal(size=(n_simulations, n_assets))
+                asset_values = (
+                    sector_loadings[np.newaxis, :] * asset_sector_factors +
+                    idio_loadings[np.newaxis, :] * idiosyncratic
+                )
 
-            ever_defaulted |= new_defaults
+                thresholds = barriers[period]  # (n_assets,) calibrated barrier
+                new_defaults = (asset_values <= thresholds[np.newaxis, :]) & ~ever_defaulted
+
+                if np.any(new_defaults):
+                    # Wrong-way risk: LGD loads on the NEGATIVE of the (per-sector)
+                    # factor, so positive systematic_lgd_correlation => higher LGD
+                    # in stress.
+                    lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
+                    lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(size=(n_simulations, n_assets))
+                    lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
+                    period_losses = lgd_realized * asset_exposures[np.newaxis, :]
+                    losses = np.where(new_defaults, period_losses, losses)
+
+                ever_defaulted |= new_defaults
 
         total_losses = losses.sum(axis=1)
 
@@ -573,7 +764,7 @@ class TwoFactorPortfolio(BaseSimulator):
 
         return {
             'portfolio_statistics': calculate_stats(total_losses),
-            'sector_statistics': {s: calculate_stats(l) for s, l in sector_losses.items()},
+            'sector_statistics': {s: calculate_stats(loss) for s, loss in sector_losses.items()},
         }
 
     def get_portfolio_summary(self) -> Dict[str, Any]:
@@ -606,7 +797,7 @@ class TwoFactorPortfolio(BaseSimulator):
             'correlation_structure': {
                 'sector_matrix': self.sector_correlation_matrix.tolist(),
                 'intra_sector': dict(zip(self.sector_names, self.intra_sector_correlations)),
-                'systematic_lgd': self.systematic_lgd_correlation
+                'systematic_lgd': dict(zip(self.sector_names, self.systematic_lgd_correlations))
             }
         }
 
