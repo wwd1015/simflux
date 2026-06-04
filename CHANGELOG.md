@@ -6,6 +6,8 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-03
+
 ### Fixed
 
 - **Wrong-way LGD sign corrected.** The systematic LGD coupling loaded on the
