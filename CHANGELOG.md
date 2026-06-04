@@ -56,6 +56,12 @@ contain breaking changes.
   The Python `TwoFactorPortfolio` API is backward compatible — a scalar still
   works, and `.systematic_lgd_correlation` still reads back as a scalar when
   uniform (the canonical attribute is now `.systematic_lgd_correlations`).
+- **`pd_term_structure` shorter than `n_periods` now raises `RuntimeError`**
+  instead of silently repeating the last cumulative-PD point for the unspecified
+  periods. A structure *longer* than `n_periods` is still valid — it runs a
+  sub-horizon (the first `n_periods` cumulative-PD points are used), now flagged
+  with a clearer `UserWarning`. Sweeping `n_periods` from 1..len over one fixed
+  term structure is the intended pattern.
 
 ## [0.2.0] — 2026-05-28
 

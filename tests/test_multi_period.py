@@ -123,6 +123,49 @@ class TestMultiPeriodTermStructure:
                          pd_term_structure=[0.03, 1.5])
 
 
+class TestSubHorizonTermStructure:
+    """A pd_term_structure longer than n_periods is a valid *sub-horizon* run:
+    the first n_periods cumulative-PD points are used. Sweeping n_periods from
+    1..len over one fixed curve walks up the curve (cum[0], cum[1], ...).
+    """
+
+    TS = [0.02, 0.05, 0.08, 0.10]
+
+    def _mean_loss(self, n_periods):
+        # systematic_lgd_correlation=0 so mean loss == sum PD·E[LGD]·exposure in
+        # expectation, making the ratio across horizons a clean function of the curve.
+        assets = _make_assets(n=20, pd=0.10, ts=self.TS)
+        p = sf.TwoFactorPortfolio(
+            assets=assets, intra_sector_correlations=0.2,
+            systematic_lgd_correlation=0.0,
+            config=SimulationConfig(seed=7),
+        )
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")  # sub-horizon notice expected for n_periods<len(TS)
+            r = p.simulate(n_simulations=20_000, n_periods=n_periods, period_length=1.0)
+        return r["portfolio_statistics"]["mean"]
+
+    def test_sweep_n_periods_walks_the_curve(self):
+        means = [self._mean_loss(npd) for npd in (1, 2, 3, 4)]
+        # Expected loss rises monotonically as the sub-horizon lengthens.
+        assert means[0] < means[1] < means[2] < means[3]
+        # n_periods=1 tracks cum[0]=0.02; n_periods=4 tracks cum[3]=0.10.
+        assert means[0] / means[3] == pytest.approx(self.TS[0] / self.TS[3], rel=0.25)
+
+    def test_longer_curve_emits_subhorizon_userwarning(self):
+        assets = _make_assets(n=5, pd=0.10, ts=self.TS)
+        p = sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=0.2)
+        with pytest.warns(UserWarning, match="sub-horizon"):
+            p.simulate(n_simulations=50, n_periods=2)
+
+    def test_shorter_curve_raises(self):
+        assets = _make_assets(n=5, pd=0.10, ts=[0.02, 0.05])  # only 2 points
+        p = sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=0.2)
+        with pytest.raises(RuntimeError, match="shorter than n_periods"):
+            p.simulate(n_simulations=50, n_periods=4)
+
+
 class TestMultiPeriodValidation:
     """Validate multi-period parameter checks."""
 

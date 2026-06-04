@@ -451,18 +451,36 @@ class TwoFactorPortfolio(BaseSimulator):
         if not 0.0 <= factor_persistence <= 1.0:
             raise ValueError("factor_persistence must be between 0 and 1")
 
-        # A pd_term_structure whose length disagrees with n_periods is silently
-        # clamped (extra points dropped; short ones repeat their last value), so
-        # warn rather than let the realized horizon PD differ from intent.
-        for a in self.assets:
-            if a.pd_term_structure is not None and len(a.pd_term_structure) != n_periods:
-                warnings.warn(
-                    f"pd_term_structure length ({len(a.pd_term_structure)}) != n_periods "
-                    f"({n_periods}); extra points are ignored and short structures repeat "
-                    "their last value. The horizon PD used is cum[min(n_periods-1, len-1)].",
-                    RuntimeWarning,
-                )
-                break
+        # A pd_term_structure longer than n_periods is a valid *sub-horizon* run:
+        # the simulation walks the first n_periods points of the curve, so a
+        # 4-period structure run at n_periods=1 measures default by the end of
+        # period 1 (cum[0]), not the full-horizon cumulative PD. Sweeping n_periods
+        # from 1..len over one fixed term structure is the intended use. A structure
+        # *shorter* than n_periods is under-specified — its last point is repeated
+        # for the remaining periods, which is a genuine approximation.
+        n_longer = sum(
+            1 for a in self.assets
+            if a.pd_term_structure is not None and len(a.pd_term_structure) > n_periods
+        )
+        n_shorter = sum(
+            1 for a in self.assets
+            if a.pd_term_structure is not None and len(a.pd_term_structure) < n_periods
+        )
+        if n_shorter:
+            raise RuntimeError(
+                f"pd_term_structure shorter than n_periods ({n_periods}) for {n_shorter} "
+                "asset(s): there is no cumulative PD for the later periods, so the horizon "
+                "is under-specified. Provide one cumulative PD per period "
+                "(len(pd_term_structure) >= n_periods)."
+            )
+        if n_longer:
+            warnings.warn(
+                f"pd_term_structure longer than n_periods ({n_periods}) for {n_longer} "
+                f"asset(s): running a sub-horizon, only the first {n_periods} cumulative-PD "
+                "point(s) are used. This is expected when sweeping n_periods over a fixed "
+                "term structure.",
+                UserWarning,
+            )
 
         # Frailty mode: calibrate the per-period default barriers up front (once,
         # shared by whichever backend runs) so the marginal PD is preserved.
