@@ -28,7 +28,9 @@ import numpy as np
 _TINY = 1e-30
 
 
-def _betacf(a: float, b: float, x: np.ndarray, maxit: int = 400, eps: float = 1e-14) -> np.ndarray:
+def _betacf(
+    a: float, b: float, x: np.ndarray, maxit: int = 400, eps: float = 1e-14
+) -> np.ndarray:
     """Continued fraction for the incomplete beta (Lentz), vectorized over ``x``.
 
     ``a``, ``b`` are scalars; ``x`` is an array. Returns the continued-fraction

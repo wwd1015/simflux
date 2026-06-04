@@ -1,10 +1,11 @@
 """Storage utilities for simulation results using Parquet format."""
 
+import json
 import polars as pl
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Optional, List, Dict, Union
+from typing import Any, Optional, List, Dict, Union
 from dataclasses import dataclass
 
 
@@ -39,21 +40,36 @@ class Columns:
     produces (see ``src/storage.rs::create_parquet_schema``).  Every analyzer
     query references these constants, so a schema rename touches one place
     instead of eight methods.
+
+    The store is **defaults-only**: one row per defaulted obligor per trial
+    (non-defaulted asset-trials are not written). Portfolio totals the rows no
+    longer carry — trial/asset counts, default rates — are read from the
+    file-level key-value metadata (see :class:`MetadataKeys`).
     """
 
     TRIAL_ID = "trial_id"
     ASSET_ID = "asset_id"
     SECTOR_ID = "sector_id"
     SECTOR = "sector"
-    DEFAULTED = "defaulted"
+    DEFAULT_PERIOD = "default_period"
     TIME_TO_DEFAULT = "time_to_default"
     LOSS_AMOUNT = "loss_amount"
     RECOVERY_RATE = "recovery_rate"
     ASSET_VALUE = "asset_value"
-    SYSTEMATIC_FACTOR_PREFIX = "systematic_factor"
+    SYSTEMATIC_FACTOR = "systematic_factor"
+    IDIOSYNCRATIC_FACTOR = "idiosyncratic_factor"
     PD = "pd"
     LGD_MEAN = "lgd_mean"
     EXPOSURE = "exposure"
+
+
+class MetadataKeys:
+    """File-level Parquet key-value metadata keys written by the Rust writer
+    (see ``src/storage.rs::set_metadata``). Mirror of that source."""
+
+    N_TRIALS = "simflux.n_trials"
+    N_ASSETS = "simflux.n_assets"
+    SECTOR_ASSET_COUNTS = "simflux.sector_asset_counts"
 
 
 class ParquetResultsAnalyzer:
@@ -71,6 +87,7 @@ class ParquetResultsAnalyzer:
         self.path = str(parquet_path)
         self._validate_path()
         self._lazy_frame: Optional[pl.LazyFrame] = None
+        self._meta: Optional[Dict[str, Any]] = None
 
     def _validate_path(self) -> None:
         """Validate that the Parquet path exists and is readable."""
@@ -85,6 +102,52 @@ class ParquetResultsAnalyzer:
             self._lazy_frame = pl.scan_parquet(self.path)
         return self._lazy_frame
 
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """Portfolio-shape metadata stored in the Parquet file footer.
+
+        The defaults-only store omits non-defaulted asset-trials, so totals
+        (``n_trials``, ``n_assets``, per-sector asset counts) are recovered from
+        the file's key-value metadata. Returns ``{}`` for files written without
+        it (e.g. a hand-built Parquet), and callers fall back accordingly.
+        """
+        if self._meta is None:
+            self._meta = self._read_metadata()
+        return self._meta
+
+    def _read_metadata(self) -> Dict[str, Any]:
+        try:
+            import pyarrow.parquet as pq
+
+            src = self.path
+            if Path(src).is_dir():
+                files = sorted(Path(src).glob("*.parquet"))
+                if not files:
+                    return {}
+                src = str(files[0])
+            raw = pq.read_metadata(src).metadata or {}
+        except Exception:
+            return {}
+
+        def _get(key: str) -> Optional[str]:
+            v = raw.get(key.encode()) if raw else None
+            return v.decode() if isinstance(v, (bytes, bytearray)) else v
+
+        meta: Dict[str, Any] = {}
+        n_trials = _get(MetadataKeys.N_TRIALS)
+        n_assets = _get(MetadataKeys.N_ASSETS)
+        counts = _get(MetadataKeys.SECTOR_ASSET_COUNTS)
+        if n_trials is not None:
+            meta["n_trials"] = int(n_trials)
+        if n_assets is not None:
+            meta["n_assets"] = int(n_assets)
+        if counts is not None:
+            try:
+                meta["sector_asset_counts"] = json.loads(counts)
+            except (ValueError, TypeError):
+                pass
+        return meta
+
     def get_schema(self) -> Dict[str, str]:
         """Get the schema of the stored data."""
         return {
@@ -92,13 +155,28 @@ class ParquetResultsAnalyzer:
         }
 
     def count_simulations(self) -> int:
-        """Count total number of simulation trials."""
+        """Total number of simulation trials.
+
+        Read from file metadata — a trial with zero defaults has no rows, so a
+        ``trial_id`` distinct-count would undercount. Falls back to the distinct
+        count only for files written without metadata.
+        """
+        n = self.metadata.get("n_trials")
+        if n is not None:
+            return int(n)
         return (
             self.lazy_frame.select(pl.col(Columns.TRIAL_ID).n_unique()).collect().item()
         )
 
     def count_assets(self) -> int:
-        """Count total number of assets."""
+        """Total number of assets in the portfolio.
+
+        From file metadata (an asset that never defaults has no rows). Falls
+        back to the distinct ``asset_id`` count for metadata-less files.
+        """
+        n = self.metadata.get("n_assets")
+        if n is not None:
+            return int(n)
         return (
             self.lazy_frame.select(pl.col(Columns.ASSET_ID).n_unique()).collect().item()
         )
@@ -126,8 +204,9 @@ class ParquetResultsAnalyzer:
         pl.DataFrame
             DataFrame of defaulted assets
         """
+        # Every stored row is already a default event, so no defaulted filter.
         query = self._apply_filters(
-            self.lazy_frame.filter(pl.col(Columns.DEFAULTED)),
+            self.lazy_frame,
             trial_range=trial_range,
             sectors=sectors,
             asset_ids=asset_ids,
@@ -165,15 +244,34 @@ class ParquetResultsAnalyzer:
         pl.DataFrame
             DataFrame with trial_id and total_loss columns
         """
-        query = self.lazy_frame.group_by(Columns.TRIAL_ID).agg(
-            pl.col(Columns.LOSS_AMOUNT).sum().alias("total_loss"),
-            pl.col(Columns.DEFAULTED).sum().alias("total_defaults"),
+        present = (
+            self.lazy_frame.group_by(Columns.TRIAL_ID)
+            .agg(
+                pl.col(Columns.LOSS_AMOUNT).sum().alias("total_loss"),
+                pl.len().alias("total_defaults"),  # every stored row is a default
+            )
+            .collect()
+            .with_columns(pl.col(Columns.TRIAL_ID).cast(pl.Int64))
         )
 
-        if trial_ids:
-            query = query.filter(pl.col(Columns.TRIAL_ID).is_in(trial_ids))
+        n_trials = self.metadata.get("n_trials")
+        if n_trials is not None:
+            # Reindex against every trial: trials with zero defaults are absent
+            # from the sparse store but contribute zero loss / zero defaults.
+            full = pl.DataFrame(
+                {Columns.TRIAL_ID: np.arange(int(n_trials), dtype=np.int64)}
+            )
+            df = full.join(present, on=Columns.TRIAL_ID, how="left").with_columns(
+                pl.col("total_loss").fill_null(0.0),
+                pl.col("total_defaults").fill_null(0).cast(pl.Int64),
+            )
+        else:
+            df = present
 
-        return query.collect().sort(Columns.TRIAL_ID)
+        if trial_ids:
+            df = df.filter(pl.col(Columns.TRIAL_ID).is_in(trial_ids))
+
+        return df.sort(Columns.TRIAL_ID)
 
     def analyze_by_sector(self, metrics: Optional[List[str]] = None) -> pl.DataFrame:
         """
@@ -190,41 +288,50 @@ class ParquetResultsAnalyzer:
             DataFrame with sector-level analysis
         """
         if metrics is None:
-            metrics = ["default_rate", "avg_loss", "total_exposure"]
+            metrics = ["default_rate", "avg_loss", "total_loss"]
 
-        agg_exprs = []
-
-        if "default_rate" in metrics:
-            agg_exprs.append(pl.col(Columns.DEFAULTED).mean().alias("default_rate"))
-
-        if "avg_loss" in metrics:
-            agg_exprs.append(pl.col(Columns.LOSS_AMOUNT).mean().alias("avg_loss"))
-
-        if "total_loss" in metrics:
-            agg_exprs.append(pl.col(Columns.LOSS_AMOUNT).sum().alias("total_loss"))
-
-        if "total_defaults" in metrics:
-            agg_exprs.append(pl.col(Columns.DEFAULTED).sum().alias("total_defaults"))
-
-        if "total_exposure" in metrics:
-            agg_exprs.append(pl.col(Columns.ASSET_ID).n_unique().alias("total_assets"))
-
-        return (
-            self.lazy_frame.group_by([Columns.TRIAL_ID, Columns.SECTOR])
-            .agg(agg_exprs)
-            .group_by(Columns.SECTOR)
+        # Aggregate the stored default events per sector. avg_loss is the mean
+        # loss per default event; total_defaults is the event count.
+        agg = (
+            self.lazy_frame.group_by(Columns.SECTOR)
             .agg(
-                [
-                    pl.col(col).mean().name.suffix("_mean")
-                    for col in [expr.meta.output_name() for expr in agg_exprs]
-                ]
-                + [
-                    pl.col(col).std().name.suffix("_std")
-                    for col in [expr.meta.output_name() for expr in agg_exprs]
-                ]
+                pl.col(Columns.LOSS_AMOUNT).sum().alias("total_loss"),
+                pl.col(Columns.LOSS_AMOUNT).mean().alias("avg_loss"),
+                pl.len().alias("total_defaults"),
             )
             .collect()
         )
+
+        if "default_rate" in metrics:
+            # rate = defaults / (n_trials x assets in sector), recovered from
+            # metadata since non-defaulted asset-trials are not stored.
+            n_trials = self.metadata.get("n_trials")
+            sector_counts = self.metadata.get("sector_asset_counts") or {}
+            if n_trials and sector_counts:
+                rates = [
+                    (
+                        defaults / denom
+                        if (denom := float(sector_counts.get(sec, 0)) * float(n_trials))
+                        else None
+                    )
+                    for sec, defaults in zip(
+                        agg[Columns.SECTOR].to_list(), agg["total_defaults"].to_list()
+                    )
+                ]
+                agg = agg.with_columns(
+                    pl.Series("default_rate", rates, dtype=pl.Float64)
+                )
+            else:
+                agg = agg.with_columns(
+                    pl.lit(None, dtype=pl.Float64).alias("default_rate")
+                )
+
+        keep = [Columns.SECTOR] + [
+            m
+            for m in ("default_rate", "avg_loss", "total_loss", "total_defaults")
+            if m in metrics and m in agg.columns
+        ]
+        return agg.select(keep)
 
     def query_high_loss_trials(self, percentile: float = 95) -> List[int]:
         """
@@ -252,35 +359,36 @@ class ParquetResultsAnalyzer:
     def get_systematic_factors(
         self, trial_ids: Optional[List[int]] = None
     ) -> Optional[pl.DataFrame]:
-        """
-        Get systematic factors if stored.
+        """The systematic and idiosyncratic factors recorded at each stored
+        default event.
+
+        Returns ``trial_id``, ``asset_id`` and the factor columns (one row per
+        default), or ``None`` if the factor columns are absent. Useful for
+        debugging *why* an obligor defaulted.
 
         Parameters:
         -----------
         trial_ids : List[int], optional
             Specific trial IDs to include
-
-        Returns:
-        --------
-        pl.DataFrame or None
-            DataFrame of systematic factors, or None if not stored
         """
         schema = self.get_schema()
         factor_columns = [
-            col
-            for col in schema.keys()
-            if col.startswith(Columns.SYSTEMATIC_FACTOR_PREFIX)
+            c
+            for c in (Columns.SYSTEMATIC_FACTOR, Columns.IDIOSYNCRATIC_FACTOR)
+            if c in schema
         ]
-
         if not factor_columns:
             return None
 
-        query = self.lazy_frame.select([Columns.TRIAL_ID] + factor_columns).unique()
+        select = [Columns.TRIAL_ID]
+        if Columns.ASSET_ID in schema:
+            select.append(Columns.ASSET_ID)
 
+        query = self.lazy_frame.select(select + factor_columns)
         if trial_ids:
             query = query.filter(pl.col(Columns.TRIAL_ID).is_in(trial_ids))
 
-        return query.collect().sort(Columns.TRIAL_ID)
+        return query.collect().sort(select)
 
     def calculate_portfolio_statistics(self) -> Dict[str, float]:
         """
