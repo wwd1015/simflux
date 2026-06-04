@@ -6,6 +6,15 @@ contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **NumPy fallback LGD is now correct without scipy.** When neither the Rust
+  backend nor scipy was available, the fallback returned a uniform (mean ≈ 0.5)
+  for realized LGD, ignoring `lgd_mean` and overstating loss behind only a
+  `UserWarning`. It now maps the LGD driver through a dependency-free, tabulated
+  Beta inverse-CDF (`simflux.utils.special.beta_ppf`) that matches
+  `scipy.stats.beta.ppf` to ≤1e-5. New `tests/test_special.py`.
+
 ## [0.3.0] — 2026-06-03
 
 ### Fixed
