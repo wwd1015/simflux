@@ -1,4 +1,4 @@
-use statrs::distribution::{Normal, ContinuousCDF, Continuous};
+use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 
 pub fn normal_cdf(x: f64) -> f64 {
     let normal = Normal::new(0.0, 1.0).unwrap();
@@ -57,9 +57,7 @@ pub fn calculate_portfolio_loss_statistics(losses: &[f64]) -> PortfolioStatistic
     let n = losses.len() as f64;
     let mean = losses.iter().sum::<f64>() / n;
 
-    let variance = losses.iter()
-        .map(|&x| (x - mean).powi(2))
-        .sum::<f64>() / (n - 1.0);
+    let variance = losses.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
 
     let std_dev = variance.sqrt();
 

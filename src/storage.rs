@@ -1,3 +1,4 @@
+use crate::portfolio::TrialResult;
 use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
@@ -5,7 +6,6 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::fs::File;
 use std::sync::Arc;
-use crate::portfolio::TrialResult;
 
 pub struct ParquetStorage {
     schema: SchemaRef,
@@ -59,17 +59,21 @@ impl ParquetStorage {
         Ok(())
     }
 
-    pub fn add_trial_results(&mut self,
-                           trial_results: &[TrialResult],
-                           sector_names: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn add_trial_results(
+        &mut self,
+        trial_results: &[TrialResult],
+        sector_names: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for trial in trial_results {
             for asset_result in &trial.asset_results {
                 let record = AssetRecord {
                     trial_id: trial.trial_id as i64,
                     asset_id: asset_result.asset_id as i32,
                     sector_id: asset_result.sector_id as i32,
-                    sector_name: sector_names.get(asset_result.sector_id as usize)
-                        .unwrap_or(&"Unknown".to_string()).clone(),
+                    sector_name: sector_names
+                        .get(asset_result.sector_id as usize)
+                        .unwrap_or(&"Unknown".to_string())
+                        .clone(),
                     defaulted: asset_result.defaulted,
                     time_to_default: asset_result.time_to_default.map(|t| t as f32),
                     loss_amount: asset_result.loss_amount as f32,
@@ -125,59 +129,96 @@ impl ParquetStorage {
 
     fn create_record_batch(&self) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let trial_ids = Int64Array::from(
-            self.batch_buffer.iter().map(|r| r.trial_id).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.trial_id)
+                .collect::<Vec<_>>(),
         );
 
         let asset_ids = Int32Array::from(
-            self.batch_buffer.iter().map(|r| r.asset_id).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.asset_id)
+                .collect::<Vec<_>>(),
         );
 
         let sector_ids = Int32Array::from(
-            self.batch_buffer.iter().map(|r| r.sector_id).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.sector_id)
+                .collect::<Vec<_>>(),
         );
 
         let sector_names = StringArray::from(
-            self.batch_buffer.iter().map(|r| r.sector_name.as_str()).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.sector_name.as_str())
+                .collect::<Vec<_>>(),
         );
 
         let defaulted = BooleanArray::from(
-            self.batch_buffer.iter().map(|r| r.defaulted).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.defaulted)
+                .collect::<Vec<_>>(),
         );
 
         let time_to_default = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.time_to_default).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.time_to_default)
+                .collect::<Vec<_>>(),
         );
 
         let loss_amounts = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.loss_amount).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.loss_amount)
+                .collect::<Vec<_>>(),
         );
 
         let recovery_rates = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.recovery_rate).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.recovery_rate)
+                .collect::<Vec<_>>(),
         );
 
         let asset_values = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.asset_value).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.asset_value)
+                .collect::<Vec<_>>(),
         );
 
         let sys_factor_global = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.systematic_factor_global).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.systematic_factor_global)
+                .collect::<Vec<_>>(),
         );
 
         let sys_factor_sector = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.systematic_factor_sector).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.systematic_factor_sector)
+                .collect::<Vec<_>>(),
         );
 
-        let pds = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.pd).collect::<Vec<_>>()
-        );
+        let pds = Float32Array::from(self.batch_buffer.iter().map(|r| r.pd).collect::<Vec<_>>());
 
         let lgd_means = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.lgd_mean).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.lgd_mean)
+                .collect::<Vec<_>>(),
         );
 
         let exposures = Float32Array::from(
-            self.batch_buffer.iter().map(|r| r.exposure).collect::<Vec<_>>()
+            self.batch_buffer
+                .iter()
+                .map(|r| r.exposure)
+                .collect::<Vec<_>>(),
         );
 
         let batch = RecordBatch::try_new(

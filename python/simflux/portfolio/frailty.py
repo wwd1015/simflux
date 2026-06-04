@@ -98,18 +98,18 @@ def calibrate_barriers(
     phi = float(np.clip(phi, 0.0, 1.0))
 
     f = np.linspace(-grid_limit, grid_limit, grid_points)
-    w = np.exp(-0.5 * f ** 2)
+    w = np.exp(-0.5 * f**2)
     w /= w.sum()  # standard-normal quadrature weights
 
     # Reverse AR(1) transition kernel T[i, j] = P(F_{k-1}=f_j | F_k=f_i).
     if phi <= 0.0:
-        T = np.broadcast_to(w, (grid_points, grid_points))      # independent
+        T = np.broadcast_to(w, (grid_points, grid_points))  # independent
     elif phi >= 1.0 - 1e-12:
-        T = np.eye(grid_points)                                 # frozen
+        T = np.eye(grid_points)  # frozen
     else:
         var = 1.0 - phi * phi
         diff = f[None, :] - phi * f[:, None]
-        T = np.exp(-0.5 * diff ** 2 / var)
+        T = np.exp(-0.5 * diff**2 / var)
         T /= T.sum(axis=1, keepdims=True)
 
     def survival(b: float) -> np.ndarray:
@@ -157,7 +157,7 @@ def survival_curve(
     phi = float(np.clip(phi, 0.0, 1.0))
 
     f = np.linspace(-grid_limit, grid_limit, grid_points)
-    w = np.exp(-0.5 * f ** 2)
+    w = np.exp(-0.5 * f**2)
     w /= w.sum()
     if phi <= 0.0:
         T = np.broadcast_to(w, (grid_points, grid_points))
@@ -166,7 +166,7 @@ def survival_curve(
     else:
         var = 1.0 - phi * phi
         diff = f[None, :] - phi * f[:, None]
-        T = np.exp(-0.5 * diff ** 2 / var)
+        T = np.exp(-0.5 * diff**2 / var)
         T /= T.sum(axis=1, keepdims=True)
 
     out = np.empty(n)

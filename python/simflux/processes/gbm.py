@@ -20,11 +20,13 @@ class GBM(BaseSimulator):
     - W_t is a Wiener process (Brownian motion)
     """
 
-    def __init__(self,
-                 mu: float,
-                 sigma: float,
-                 S0: float,
-                 config: Optional[SimulationConfig] = None):
+    def __init__(
+        self,
+        mu: float,
+        sigma: float,
+        S0: float,
+        config: Optional[SimulationConfig] = None,
+    ):
         """
         Initialize GBM simulator.
 
@@ -54,10 +56,7 @@ class GBM(BaseSimulator):
         if S0 <= 0:
             raise ValueError("S0 must be positive")
 
-    def simulate(self,
-                 n_paths: int,
-                 n_steps: int,
-                 T: float = 1.0) -> np.ndarray:
+    def simulate(self, n_paths: int, n_steps: int, T: float = 1.0) -> np.ndarray:
         """
         Simulate GBM paths.
 
@@ -81,7 +80,7 @@ class GBM(BaseSimulator):
             s0=self.S0,
             n_paths=n_paths,
             n_steps=n_steps,
-            T=T
+            T=T,
         )
 
     def simulate_single_path(self, n_steps: int, T: float = 1.0) -> np.ndarray:
@@ -133,12 +132,14 @@ class CorrelatedGBM(BaseSimulator):
     the specified correlation matrix.
     """
 
-    def __init__(self,
-                 mu: List[float],
-                 sigma: List[float],
-                 S0: List[float],
-                 correlation_matrix: Union[np.ndarray, List[List[float]]],
-                 config: Optional[SimulationConfig] = None):
+    def __init__(
+        self,
+        mu: List[float],
+        sigma: List[float],
+        S0: List[float],
+        correlation_matrix: Union[np.ndarray, List[List[float]]],
+        config: Optional[SimulationConfig] = None,
+    ):
         """
         Initialize correlated GBM simulator.
 
@@ -185,10 +186,7 @@ class CorrelatedGBM(BaseSimulator):
 
         validate_correlation_matrix_strict(correlation_matrix)
 
-    def simulate(self,
-                 n_paths: int,
-                 n_steps: int,
-                 T: float = 1.0) -> np.ndarray:
+    def simulate(self, n_paths: int, n_steps: int, T: float = 1.0) -> np.ndarray:
         """
         Simulate correlated GBM paths.
 
@@ -213,7 +211,7 @@ class CorrelatedGBM(BaseSimulator):
             correlation_matrix=self.correlation_matrix,
             n_paths=n_paths,
             n_steps=n_steps,
-            T=T
+            T=T,
         )
 
     def simulate_single_path(self, n_steps: int, T: float = 1.0) -> np.ndarray:
@@ -244,11 +242,13 @@ class CorrelatedGBM(BaseSimulator):
         return self.correlation_matrix.copy()
 
     @classmethod
-    def from_single_gbm(cls,
-                       gbm: GBM,
-                       n_assets: int,
-                       correlation_matrix: Union[np.ndarray, List[List[float]]],
-                       config: Optional[SimulationConfig] = None) -> 'CorrelatedGBM':
+    def from_single_gbm(
+        cls,
+        gbm: GBM,
+        n_assets: int,
+        correlation_matrix: Union[np.ndarray, List[List[float]]],
+        config: Optional[SimulationConfig] = None,
+    ) -> "CorrelatedGBM":
         """
         Create a CorrelatedGBM from a single GBM with identical parameters.
 

@@ -41,6 +41,15 @@ contain breaking changes.
 - **`docs/adr/0001`** records the scenario-agnostic (no macro/CCAR conditioning)
   design decision; methodology §2.10–2.11 position the LGD model against industry.
 
+### Changed
+
+- **Wheels are now `abi3` (CPython 3.12+).** A single forward-compatible wheel
+  per platform installs on Python 3.12 and newer, so newer Python releases no
+  longer require a fresh build (the wheel CI previously broke when a runner
+  shipped a Python newer than pyo3's supported maximum). The unused
+  `pyo3-polars` dependency was dropped, and the Rust/Python lint gate (rustfmt,
+  clippy, black, ruff, mypy) now passes.
+
 ### Breaking changes
 
 - **Multi-period default timing now defaults to `"copula"`** (was the implicit

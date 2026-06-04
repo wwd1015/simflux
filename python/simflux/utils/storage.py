@@ -58,11 +58,11 @@ class Columns:
 
 class ParquetResultsAnalyzer:
     """Analyzer for Parquet-stored simulation results with efficient querying."""
-    
+
     def __init__(self, parquet_path: Union[str, Path]):
         """
         Initialize analyzer with Parquet file/directory path.
-        
+
         Parameters:
         -----------
         parquet_path : str or Path
@@ -70,46 +70,48 @@ class ParquetResultsAnalyzer:
         """
         self.path = str(parquet_path)
         self._validate_path()
-        self._lazy_frame = None
-    
+        self._lazy_frame: Optional[pl.LazyFrame] = None
+
     def _validate_path(self) -> None:
         """Validate that the Parquet path exists and is readable."""
         path = Path(self.path)
         if not path.exists():
             raise FileNotFoundError(f"Parquet path not found: {self.path}")
-    
+
     @property
     def lazy_frame(self) -> pl.LazyFrame:
         """Get lazy frame for efficient querying."""
         if self._lazy_frame is None:
             self._lazy_frame = pl.scan_parquet(self.path)
         return self._lazy_frame
-    
+
     def get_schema(self) -> Dict[str, str]:
         """Get the schema of the stored data."""
-        return dict(self.lazy_frame.schema)
-    
+        return {
+            name: str(dtype) for name, dtype in self.lazy_frame.collect_schema().items()
+        }
+
     def count_simulations(self) -> int:
         """Count total number of simulation trials."""
-        return (self.lazy_frame
-                .select(pl.col(Columns.TRIAL_ID).n_unique())
-                .collect()
-                .item())
+        return (
+            self.lazy_frame.select(pl.col(Columns.TRIAL_ID).n_unique()).collect().item()
+        )
 
     def count_assets(self) -> int:
         """Count total number of assets."""
-        return (self.lazy_frame
-                .select(pl.col(Columns.ASSET_ID).n_unique())
-                .collect()
-                .item())
-    
-    def get_defaults(self,
-                     trial_range: Optional[tuple[int, int]] = None,
-                     sectors: Optional[List[str]] = None,
-                     asset_ids: Optional[List[int]] = None) -> pl.DataFrame:
+        return (
+            self.lazy_frame.select(pl.col(Columns.ASSET_ID).n_unique()).collect().item()
+        )
+
+    def get_defaults(
+        self,
+        trial_range: Optional[tuple[int, int]] = None,
+        sectors: Optional[List[str]] = None,
+        asset_ids: Optional[List[int]] = None,
+    ) -> pl.DataFrame:
         """
         Get defaulted assets with efficient filtering.
-        
+
         Parameters:
         -----------
         trial_range : tuple, optional
@@ -118,23 +120,27 @@ class ParquetResultsAnalyzer:
             Sectors to include
         asset_ids : List[int], optional
             Specific asset IDs to include
-            
+
         Returns:
         --------
         pl.DataFrame
             DataFrame of defaulted assets
         """
         query = self._apply_filters(
-            self.lazy_frame.filter(pl.col(Columns.DEFAULTED) == True),
-            trial_range=trial_range, sectors=sectors, asset_ids=asset_ids,
+            self.lazy_frame.filter(pl.col(Columns.DEFAULTED)),
+            trial_range=trial_range,
+            sectors=sectors,
+            asset_ids=asset_ids,
         )
         return query.collect()
 
-    def _apply_filters(self,
-                       query: pl.LazyFrame,
-                       trial_range: Optional[tuple[int, int]] = None,
-                       sectors: Optional[List[str]] = None,
-                       asset_ids: Optional[List[int]] = None) -> pl.LazyFrame:
+    def _apply_filters(
+        self,
+        query: pl.LazyFrame,
+        trial_range: Optional[tuple[int, int]] = None,
+        sectors: Optional[List[str]] = None,
+        asset_ids: Optional[List[int]] = None,
+    ) -> pl.LazyFrame:
         """Apply the shared domain filters (trial range, sectors, asset ids)."""
         if trial_range:
             start, end = trial_range
@@ -144,16 +150,16 @@ class ParquetResultsAnalyzer:
         if asset_ids:
             query = query.filter(pl.col(Columns.ASSET_ID).is_in(asset_ids))
         return query
-    
+
     def get_trial_losses(self, trial_ids: Optional[List[int]] = None) -> pl.DataFrame:
         """
         Get total losses per trial.
-        
+
         Parameters:
         -----------
         trial_ids : List[int], optional
             Specific trial IDs to include
-            
+
         Returns:
         --------
         pl.DataFrame
@@ -161,68 +167,74 @@ class ParquetResultsAnalyzer:
         """
         query = self.lazy_frame.group_by(Columns.TRIAL_ID).agg(
             pl.col(Columns.LOSS_AMOUNT).sum().alias("total_loss"),
-            pl.col(Columns.DEFAULTED).sum().alias("total_defaults")
+            pl.col(Columns.DEFAULTED).sum().alias("total_defaults"),
         )
 
         if trial_ids:
             query = query.filter(pl.col(Columns.TRIAL_ID).is_in(trial_ids))
 
         return query.collect().sort(Columns.TRIAL_ID)
-    
-    def analyze_by_sector(self, metrics: List[str] = None) -> pl.DataFrame:
+
+    def analyze_by_sector(self, metrics: Optional[List[str]] = None) -> pl.DataFrame:
         """
         Analyze results by sector across all trials.
-        
+
         Parameters:
         -----------
         metrics : List[str], optional
             Metrics to calculate. Defaults to ['default_rate', 'avg_loss']
-            
+
         Returns:
         --------
         pl.DataFrame
             DataFrame with sector-level analysis
         """
         if metrics is None:
-            metrics = ['default_rate', 'avg_loss', 'total_exposure']
-        
+            metrics = ["default_rate", "avg_loss", "total_exposure"]
+
         agg_exprs = []
 
-        if 'default_rate' in metrics:
+        if "default_rate" in metrics:
             agg_exprs.append(pl.col(Columns.DEFAULTED).mean().alias("default_rate"))
 
-        if 'avg_loss' in metrics:
+        if "avg_loss" in metrics:
             agg_exprs.append(pl.col(Columns.LOSS_AMOUNT).mean().alias("avg_loss"))
 
-        if 'total_loss' in metrics:
+        if "total_loss" in metrics:
             agg_exprs.append(pl.col(Columns.LOSS_AMOUNT).sum().alias("total_loss"))
 
-        if 'total_defaults' in metrics:
+        if "total_defaults" in metrics:
             agg_exprs.append(pl.col(Columns.DEFAULTED).sum().alias("total_defaults"))
 
-        if 'total_exposure' in metrics:
+        if "total_exposure" in metrics:
             agg_exprs.append(pl.col(Columns.ASSET_ID).n_unique().alias("total_assets"))
 
-        return (self.lazy_frame
-                .group_by([Columns.TRIAL_ID, Columns.SECTOR])
-                .agg(agg_exprs)
-                .group_by(Columns.SECTOR)
-                .agg([
-                    pl.col(col).mean().name.suffix("_mean") for col in [expr.meta.output_name() for expr in agg_exprs]
-                ] + [
-                    pl.col(col).std().name.suffix("_std") for col in [expr.meta.output_name() for expr in agg_exprs]
-                ])
-                .collect())
-    
+        return (
+            self.lazy_frame.group_by([Columns.TRIAL_ID, Columns.SECTOR])
+            .agg(agg_exprs)
+            .group_by(Columns.SECTOR)
+            .agg(
+                [
+                    pl.col(col).mean().name.suffix("_mean")
+                    for col in [expr.meta.output_name() for expr in agg_exprs]
+                ]
+                + [
+                    pl.col(col).std().name.suffix("_std")
+                    for col in [expr.meta.output_name() for expr in agg_exprs]
+                ]
+            )
+            .collect()
+        )
+
     def query_high_loss_trials(self, percentile: float = 95) -> List[int]:
         """
         Find trial IDs with losses above specified percentile.
-        
+
         Parameters:
         -----------
         percentile : float, default=95
             Percentile threshold (0-100)
-            
+
         Returns:
         --------
         List[int]
@@ -230,31 +242,35 @@ class ParquetResultsAnalyzer:
         """
         trial_losses = self.get_trial_losses()
         threshold = np.percentile(trial_losses["total_loss"], percentile)
-        
-        high_loss_trials = trial_losses.filter(
-            pl.col("total_loss") >= threshold
-        )["trial_id"].to_list()
-        
+
+        high_loss_trials = trial_losses.filter(pl.col("total_loss") >= threshold)[
+            "trial_id"
+        ].to_list()
+
         return sorted(high_loss_trials)
-    
-    def get_systematic_factors(self, 
-                              trial_ids: Optional[List[int]] = None) -> Optional[pl.DataFrame]:
+
+    def get_systematic_factors(
+        self, trial_ids: Optional[List[int]] = None
+    ) -> Optional[pl.DataFrame]:
         """
         Get systematic factors if stored.
-        
+
         Parameters:
         -----------
         trial_ids : List[int], optional
             Specific trial IDs to include
-            
+
         Returns:
         --------
         pl.DataFrame or None
             DataFrame of systematic factors, or None if not stored
         """
         schema = self.get_schema()
-        factor_columns = [col for col in schema.keys()
-                          if col.startswith(Columns.SYSTEMATIC_FACTOR_PREFIX)]
+        factor_columns = [
+            col
+            for col in schema.keys()
+            if col.startswith(Columns.SYSTEMATIC_FACTOR_PREFIX)
+        ]
 
         if not factor_columns:
             return None
@@ -265,11 +281,11 @@ class ParquetResultsAnalyzer:
             query = query.filter(pl.col(Columns.TRIAL_ID).is_in(trial_ids))
 
         return query.collect().sort(Columns.TRIAL_ID)
-    
+
     def calculate_portfolio_statistics(self) -> Dict[str, float]:
         """
         Calculate portfolio-level risk statistics.
-        
+
         Returns:
         --------
         Dict[str, float]
@@ -277,24 +293,30 @@ class ParquetResultsAnalyzer:
         """
         trial_losses = self.get_trial_losses()
         losses = trial_losses["total_loss"].to_numpy()
-        
+
         return {
             "mean_loss": float(np.mean(losses)),
             "std_loss": float(np.std(losses)),
             "var_95": float(np.percentile(losses, 95)),
             "var_99": float(np.percentile(losses, 99)),
             "var_999": float(np.percentile(losses, 99.9)),
-            "expected_shortfall_95": float(np.mean(losses[losses >= np.percentile(losses, 95)])),
-            "expected_shortfall_99": float(np.mean(losses[losses >= np.percentile(losses, 99)])),
+            "expected_shortfall_95": float(
+                np.mean(losses[losses >= np.percentile(losses, 95)])
+            ),
+            "expected_shortfall_99": float(
+                np.mean(losses[losses >= np.percentile(losses, 99)])
+            ),
             "max_loss": float(np.max(losses)),
             "min_loss": float(np.min(losses)),
         }
-    
-    def export_to_pandas(self,
-                        trial_range: Optional[tuple[int, int]] = None,
-                        sectors: Optional[List[str]] = None,
-                        asset_ids: Optional[List[int]] = None,
-                        columns: Optional[List[str]] = None) -> pd.DataFrame:
+
+    def export_to_pandas(
+        self,
+        trial_range: Optional[tuple[int, int]] = None,
+        sectors: Optional[List[str]] = None,
+        asset_ids: Optional[List[int]] = None,
+        columns: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
         """
         Export filtered data to a pandas DataFrame using domain filters.
 
@@ -319,8 +341,10 @@ class ParquetResultsAnalyzer:
             Pandas DataFrame.
         """
         query = self._apply_filters(
-            self.lazy_frame, trial_range=trial_range,
-            sectors=sectors, asset_ids=asset_ids,
+            self.lazy_frame,
+            trial_range=trial_range,
+            sectors=sectors,
+            asset_ids=asset_ids,
         )
 
         if columns:

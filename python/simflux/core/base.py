@@ -43,7 +43,9 @@ class SimulationConfig:
             raise ValueError("memory_limit_gb must be positive")
 
 
-def check_memory(config: SimulationConfig, n_elements: int, element_bytes: int = 8) -> None:
+def check_memory(
+    config: SimulationConfig, n_elements: int, element_bytes: int = 8
+) -> None:
     """Check if estimated memory usage exceeds configured limit.
 
     Parameters
@@ -62,7 +64,7 @@ def check_memory(config: SimulationConfig, n_elements: int, element_bytes: int =
     """
     if config.memory_limit_gb is None:
         return
-    estimated_gb = (n_elements * element_bytes) / (1024 ** 3)
+    estimated_gb = (n_elements * element_bytes) / (1024**3)
     if estimated_gb > config.memory_limit_gb:
         raise MemoryError(
             f"Estimated memory usage ({estimated_gb:.2f} GB) exceeds limit "

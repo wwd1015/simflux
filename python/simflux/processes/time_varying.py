@@ -26,13 +26,15 @@ class TimeVaryingGBM(BaseSimulator):
     Simply provide time series arrays for mu and sigma values.
     """
 
-    def __init__(self,
-                 mu_times: Union[np.ndarray, List[float]],
-                 mu_values: Union[np.ndarray, List[float]],
-                 sigma_times: Union[np.ndarray, List[float]],
-                 sigma_values: Union[np.ndarray, List[float]],
-                 S0: float,
-                 config: Optional[SimulationConfig] = None) -> None:
+    def __init__(
+        self,
+        mu_times: Union[np.ndarray, List[float]],
+        mu_values: Union[np.ndarray, List[float]],
+        sigma_times: Union[np.ndarray, List[float]],
+        sigma_values: Union[np.ndarray, List[float]],
+        S0: float,
+        config: Optional[SimulationConfig] = None,
+    ) -> None:
         super().__init__(config)
         self.mu_times = np.asarray(mu_times)
         self.mu_values = np.asarray(mu_values)
@@ -66,10 +68,7 @@ class TimeVaryingGBM(BaseSimulator):
         sigma = _linear_interpolate(t, self.sigma_times, self.sigma_values)
         return mu, sigma
 
-    def simulate(self,
-                 n_paths: int,
-                 n_steps: int,
-                 T: float) -> np.ndarray:
+    def simulate(self, n_paths: int, n_steps: int, T: float) -> np.ndarray:
         """
         Simulate time-varying GBM paths.
 
@@ -106,14 +105,16 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
     Simply provide time series for each asset's parameters.
     """
 
-    def __init__(self,
-                 mu_times: List[Union[np.ndarray, List[float]]],
-                 mu_values: List[Union[np.ndarray, List[float]]],
-                 sigma_times: List[Union[np.ndarray, List[float]]],
-                 sigma_values: List[Union[np.ndarray, List[float]]],
-                 S0: Union[np.ndarray, List[float]],
-                 correlation_matrix: np.ndarray,
-                 config: Optional[SimulationConfig] = None) -> None:
+    def __init__(
+        self,
+        mu_times: List[Union[np.ndarray, List[float]]],
+        mu_values: List[Union[np.ndarray, List[float]]],
+        sigma_times: List[Union[np.ndarray, List[float]]],
+        sigma_values: List[Union[np.ndarray, List[float]]],
+        S0: Union[np.ndarray, List[float]],
+        correlation_matrix: np.ndarray,
+        config: Optional[SimulationConfig] = None,
+    ) -> None:
         super().__init__(config)
         self.n_assets = len(S0)
         self.S0 = np.asarray(S0)
@@ -148,20 +149,21 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
         Convenience/inspection helper; the simulation interpolates internally
         per backend and does not call this.
         """
-        mu = np.array([
-            _linear_interpolate(t, self.mu_times[i], self.mu_values[i])
-            for i in range(self.n_assets)
-        ])
-        sigma = np.array([
-            _linear_interpolate(t, self.sigma_times[i], self.sigma_values[i])
-            for i in range(self.n_assets)
-        ])
+        mu = np.array(
+            [
+                _linear_interpolate(t, self.mu_times[i], self.mu_values[i])
+                for i in range(self.n_assets)
+            ]
+        )
+        sigma = np.array(
+            [
+                _linear_interpolate(t, self.sigma_times[i], self.sigma_values[i])
+                for i in range(self.n_assets)
+            ]
+        )
         return mu, sigma
 
-    def simulate(self,
-                 n_paths: int,
-                 n_steps: int,
-                 T: float) -> np.ndarray:
+    def simulate(self, n_paths: int, n_steps: int, T: float) -> np.ndarray:
         """
         Simulate multi-asset time-varying GBM paths.
 

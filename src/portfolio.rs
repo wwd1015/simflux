@@ -1,12 +1,15 @@
-use pyo3::prelude::*;
+use crate::correlation::{SystematicFactors, TwoFactorCorrelationStructure};
+use crate::math_utils::{
+    beta_mean_var_to_params, calculate_default_threshold, calculate_portfolio_loss_statistics,
+    PortfolioStatistics,
+};
 use crate::random::{create_rng, sample_standard_normal};
-use crate::correlation::{TwoFactorCorrelationStructure, SystematicFactors};
-use crate::math_utils::{calculate_default_threshold, beta_mean_var_to_params, PortfolioStatistics, calculate_portfolio_loss_statistics};
+use pyo3::prelude::*;
+use rand::rngs::StdRng;
 use rayon::prelude::*;
+use statrs::distribution::{Beta as StatrsBeta, ContinuousCDF};
 use std::collections::HashMap;
 use thiserror::Error;
-use statrs::distribution::{Beta as StatrsBeta, ContinuousCDF};
-use rand::rngs::StdRng;
 
 #[derive(Error, Debug)]
 pub enum PortfolioError {
@@ -59,54 +62,62 @@ impl AssetData {
     ) -> PyResult<Self> {
         if pd < 0.0 || pd > 1.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "PD must be between 0 and 1"
+                "PD must be between 0 and 1",
             ));
         }
         if lgd_mean < 0.0 || lgd_mean > 1.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "LGD mean must be between 0 and 1"
+                "LGD mean must be between 0 and 1",
             ));
         }
         if lgd_std <= 0.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "LGD std must be positive"
+                "LGD std must be positive",
             ));
         }
         if exposure < 0.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Exposure must be non-negative"
+                "Exposure must be non-negative",
             ));
         }
         // Validate Beta distribution feasibility
         let max_lgd_var = lgd_mean * (1.0 - lgd_mean);
         if lgd_std * lgd_std >= max_lgd_var {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("lgd_std ({:.4}) must be less than sqrt(lgd_mean*(1-lgd_mean)) = {:.4}",
-                        lgd_std, max_lgd_var.sqrt())
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "lgd_std ({:.4}) must be less than sqrt(lgd_mean*(1-lgd_mean)) = {:.4}",
+                lgd_std,
+                max_lgd_var.sqrt()
+            )));
         }
 
         if let Some(ref ts) = pd_term_structure {
             for (i, &p) in ts.iter().enumerate() {
                 if p < 0.0 || p > 1.0 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("pd_term_structure[{}] must be between 0 and 1", i)
-                    ));
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "pd_term_structure[{}] must be between 0 and 1",
+                        i
+                    )));
                 }
             }
             // Cumulative PDs must be non-decreasing
             for i in 1..ts.len() {
                 if ts[i] < ts[i - 1] - 1e-10 {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "pd_term_structure must be non-decreasing (cumulative PDs)"
+                        "pd_term_structure must be non-decreasing (cumulative PDs)",
                     ));
                 }
             }
         }
 
         Ok(AssetData {
-            asset_id, sector_id, pd, lgd_mean, lgd_std,
-            exposure, sector_name, pd_term_structure,
+            asset_id,
+            sector_id,
+            pd,
+            lgd_mean,
+            lgd_std,
+            exposure,
+            sector_name,
+            pd_term_structure,
         })
     }
 
@@ -207,47 +218,48 @@ impl PortfolioConfig {
         for &corr in &systematic_lgd_correlations {
             if corr.abs() > 1.0 {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Systematic LGD correlations must be between -1 and 1"
+                    "Systematic LGD correlations must be between -1 and 1",
                 ));
             }
         }
         if systematic_lgd_correlations.len() != sector_names.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Systematic LGD correlations and sector names must have same length"
+                "Systematic LGD correlations and sector names must have same length",
             ));
         }
         for &corr in &intra_sector_correlations {
             if corr.abs() > 1.0 {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Intra-sector correlations must be between -1 and 1"
+                    "Intra-sector correlations must be between -1 and 1",
                 ));
             }
         }
         if intra_sector_correlations.len() != sector_names.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Intra-sector correlations and sector names must have same length"
+                "Intra-sector correlations and sector names must have same length",
             ));
         }
         let matrix = sector_correlation_matrix.ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "sector_correlation_matrix must be provided"
+                "sector_correlation_matrix must be provided",
             )
         })?;
         if matrix.len() != sector_names.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "sector_correlation_matrix must match number of sectors"
+                "sector_correlation_matrix must match number of sectors",
             ));
         }
         for row in &matrix {
             if row.len() != sector_names.len() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "sector_correlation_matrix must be square"
+                    "sector_correlation_matrix must be square",
                 ));
             }
         }
         Ok(PortfolioConfig {
             intra_sector_correlations,
-            systematic_lgd_correlations, sector_names,
+            systematic_lgd_correlations,
+            sector_names,
             sector_correlation_matrix: matrix,
         })
     }
@@ -293,16 +305,39 @@ impl ToPyObject for SimulationResults {
         let dict = pyo3::types::PyDict::new_bound(py);
 
         let portfolio_stats = pyo3::types::PyDict::new_bound(py);
-        portfolio_stats.set_item("mean", self.portfolio_statistics.mean).unwrap();
-        portfolio_stats.set_item("std_dev", self.portfolio_statistics.std_dev).unwrap();
-        portfolio_stats.set_item("var_95", self.portfolio_statistics.var_95).unwrap();
-        portfolio_stats.set_item("var_99", self.portfolio_statistics.var_99).unwrap();
-        portfolio_stats.set_item("var_999", self.portfolio_statistics.var_999).unwrap();
-        portfolio_stats.set_item("expected_shortfall_95", self.portfolio_statistics.expected_shortfall_95).unwrap();
-        portfolio_stats.set_item("expected_shortfall_99", self.portfolio_statistics.expected_shortfall_99).unwrap();
-        portfolio_stats.set_item("max_loss", self.portfolio_statistics.max_loss).unwrap();
+        portfolio_stats
+            .set_item("mean", self.portfolio_statistics.mean)
+            .unwrap();
+        portfolio_stats
+            .set_item("std_dev", self.portfolio_statistics.std_dev)
+            .unwrap();
+        portfolio_stats
+            .set_item("var_95", self.portfolio_statistics.var_95)
+            .unwrap();
+        portfolio_stats
+            .set_item("var_99", self.portfolio_statistics.var_99)
+            .unwrap();
+        portfolio_stats
+            .set_item("var_999", self.portfolio_statistics.var_999)
+            .unwrap();
+        portfolio_stats
+            .set_item(
+                "expected_shortfall_95",
+                self.portfolio_statistics.expected_shortfall_95,
+            )
+            .unwrap();
+        portfolio_stats
+            .set_item(
+                "expected_shortfall_99",
+                self.portfolio_statistics.expected_shortfall_99,
+            )
+            .unwrap();
+        portfolio_stats
+            .set_item("max_loss", self.portfolio_statistics.max_loss)
+            .unwrap();
 
-        dict.set_item("portfolio_statistics", portfolio_stats).unwrap();
+        dict.set_item("portfolio_statistics", portfolio_stats)
+            .unwrap();
         dict.set_item("n_trials", self.trial_results.len()).unwrap();
 
         let sector_stats_dict = pyo3::types::PyDict::new_bound(py);
@@ -313,12 +348,17 @@ impl ToPyObject for SimulationResults {
             sector_dict.set_item("var_95", stats.var_95).unwrap();
             sector_dict.set_item("var_99", stats.var_99).unwrap();
             sector_dict.set_item("var_999", stats.var_999).unwrap();
-            sector_dict.set_item("expected_shortfall_95", stats.expected_shortfall_95).unwrap();
-            sector_dict.set_item("expected_shortfall_99", stats.expected_shortfall_99).unwrap();
+            sector_dict
+                .set_item("expected_shortfall_95", stats.expected_shortfall_95)
+                .unwrap();
+            sector_dict
+                .set_item("expected_shortfall_99", stats.expected_shortfall_99)
+                .unwrap();
             sector_dict.set_item("max_loss", stats.max_loss).unwrap();
             sector_stats_dict.set_item(sector, sector_dict).unwrap();
         }
-        dict.set_item("sector_statistics", sector_stats_dict).unwrap();
+        dict.set_item("sector_statistics", sector_stats_dict)
+            .unwrap();
 
         dict.to_object(py)
     }
@@ -345,10 +385,14 @@ pub fn simulate_portfolio_losses(
     validate_portfolio_inputs(config, assets)?;
 
     if n_periods == 0 {
-        return Err(PortfolioError::ConfigError("n_periods must be positive".to_string()));
+        return Err(PortfolioError::ConfigError(
+            "n_periods must be positive".to_string(),
+        ));
     }
     if period_length <= 0.0 {
-        return Err(PortfolioError::ConfigError("period_length must be positive".to_string()));
+        return Err(PortfolioError::ConfigError(
+            "period_length must be positive".to_string(),
+        ));
     }
     // "copula": single frozen latent vs cumulative thresholds (default times,
     // Li 2000). "frailty": persistent AR(1) factor with fresh idiosyncratic and
@@ -356,27 +400,36 @@ pub fn simulate_portfolio_losses(
     let copula = match default_timing {
         "copula" => true,
         "frailty" => false,
-        other => return Err(PortfolioError::ConfigError(
-            format!("default_timing must be 'copula' or 'frailty', got '{}'", other))),
+        other => {
+            return Err(PortfolioError::ConfigError(format!(
+                "default_timing must be 'copula' or 'frailty', got '{}'",
+                other
+            )))
+        }
     };
     if !copula {
         if barriers.len() != assets.len() {
             return Err(PortfolioError::ConfigError(
-                "frailty mode requires one barrier row per asset".to_string()));
+                "frailty mode requires one barrier row per asset".to_string(),
+            ));
         }
         // Guard the inner dimension too: simulate_single_trial indexes
         // barriers[idx][period] for period in 0..n_periods, so a too-short row
         // would panic across the FFI boundary instead of erroring cleanly.
         if barriers.iter().any(|row| row.len() < n_periods) {
             return Err(PortfolioError::ConfigError(
-                "frailty mode requires n_periods barriers per asset".to_string()));
+                "frailty mode requires n_periods barriers per asset".to_string(),
+            ));
         }
     }
 
     // Group assets by sector
     let mut sector_assets: HashMap<u32, Vec<&AssetData>> = HashMap::new();
     for asset in assets {
-        sector_assets.entry(asset.sector_id).or_insert_with(Vec::new).push(asset);
+        sector_assets
+            .entry(asset.sector_id)
+            .or_insert_with(Vec::new)
+            .push(asset);
     }
 
     let sector_sizes: Vec<usize> = (0..config.sector_names.len())
@@ -387,7 +440,8 @@ pub fn simulate_portfolio_losses(
         config.intra_sector_correlations.clone(),
         sector_sizes,
         Some(config.sector_correlation_matrix.clone()),
-    ).map_err(|e| PortfolioError::ConfigError(e.to_string()))?;
+    )
+    .map_err(|e| PortfolioError::ConfigError(e.to_string()))?;
 
     // Generate systematic factors.  The "copula" model freezes a single set
     // across the horizon (one generated); "frailty" draws an independent
@@ -396,7 +450,8 @@ pub fn simulate_portfolio_losses(
     let n_factor_sets = if copula { 1 } else { n_periods };
     let mut all_factors: Vec<Vec<SystematicFactors>> = (0..n_factor_sets)
         .map(|period| {
-            let period_seed = seed.map(|s| s.wrapping_add((period * n_simulations + 1_000_000) as u64));
+            let period_seed =
+                seed.map(|s| s.wrapping_add((period * n_simulations + 1_000_000) as u64));
             correlation_structure.generate_factors(n_simulations, period_seed)
         })
         .collect();
@@ -411,7 +466,8 @@ pub fn simulate_portfolio_losses(
                 for s in 0..n_sectors {
                     let prev = all_factors[period - 1][trial].sector_factors[s];
                     let innov = all_factors[period][trial].sector_factors[s];
-                    all_factors[period][trial].sector_factors[s] = factor_phi * prev + sqrt_innov * innov;
+                    all_factors[period][trial].sector_factors[s] =
+                        factor_phi * prev + sqrt_innov * innov;
                 }
             }
         }
@@ -422,9 +478,16 @@ pub fn simulate_portfolio_losses(
         .into_par_iter()
         .map(|trial_id| {
             simulate_single_trial(
-                trial_id, config, assets,
-                &correlation_structure, &all_factors, barriers,
-                n_periods, period_length, copula, seed,
+                trial_id,
+                config,
+                assets,
+                &correlation_structure,
+                &all_factors,
+                barriers,
+                n_periods,
+                period_length,
+                copula,
+                seed,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -438,14 +501,19 @@ pub fn simulate_portfolio_losses(
         let sector_losses: Vec<f64> = trial_results
             .iter()
             .map(|trial| {
-                trial.asset_results.iter()
+                trial
+                    .asset_results
+                    .iter()
                     .filter(|a| a.sector_id == sector_id as u32)
                     .map(|a| a.loss_amount)
                     .sum()
             })
             .collect();
         if !sector_losses.is_empty() {
-            sector_statistics.insert(sector_name.clone(), calculate_portfolio_loss_statistics(&sector_losses));
+            sector_statistics.insert(
+                sector_name.clone(),
+                calculate_portfolio_loss_statistics(&sector_losses),
+            );
         }
     }
 
@@ -455,7 +523,11 @@ pub fn simulate_portfolio_losses(
         }
     }
 
-    Ok(SimulationResults { trial_results, portfolio_statistics, sector_statistics })
+    Ok(SimulationResults {
+        trial_results,
+        portfolio_statistics,
+        sector_statistics,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -467,8 +539,8 @@ fn simulate_single_trial(
     config: &PortfolioConfig,
     assets: &[AssetData],
     correlation_structure: &TwoFactorCorrelationStructure,
-    all_factors: &[Vec<SystematicFactors>],  // [period][trial]
-    barriers: &[Vec<f64>],                    // [asset][period], frailty only
+    all_factors: &[Vec<SystematicFactors>], // [period][trial]
+    barriers: &[Vec<f64>],                  // [asset][period], frailty only
     n_periods: usize,
     period_length: f64,
     copula: bool,
@@ -504,7 +576,8 @@ fn simulate_single_trial(
             factor_global[idx] = sector_factor;
             factor_sector[idx] = sector_factor;
 
-            let threshold_final = calculate_default_threshold(cumulative_pd(asset, n_periods - 1, n_periods));
+            let threshold_final =
+                calculate_default_threshold(cumulative_pd(asset, n_periods - 1, n_periods));
             if value <= threshold_final {
                 defaulted[idx] = true;
                 // Default period = first k whose cumulative threshold is crossed.
@@ -519,43 +592,6 @@ fn simulate_single_trial(
 
                 let lgd_corr = config.systematic_lgd_correlations[sector_index];
                 match compute_loss(asset, sector_factor, lgd_corr, &mut rng) {
-                    Ok((loss, recovery)) => { loss_amounts[idx] = loss; recovery_rates[idx] = recovery; }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-    } else {
-    // Frailty: persistent (already AR(1)-coupled) factor, fresh idiosyncratic
-    // each period, first-passage against the pre-calibrated per-period barriers.
-    for period in 0..n_periods {
-        let factors = &all_factors[period][trial_id];
-
-        for (idx, asset) in assets.iter().enumerate() {
-            if defaulted[idx] {
-                continue; // already defaulted in an earlier period
-            }
-
-            let sector_index = asset.sector_id as usize;
-            let sector_factor = factors.get_sector_factor(sector_index);
-
-            let intra_corr = correlation_structure.intra_sector_correlations[sector_index];
-            let sector_loading = intra_corr.sqrt();
-            let idio_loading = (1.0 - intra_corr).max(0.0).sqrt();
-            let idio = sample_standard_normal(&mut rng);
-
-            let value = sector_loading * sector_factor + idio_loading * idio;
-            asset_values[idx] = value;
-            factor_global[idx] = sector_factor;
-            factor_sector[idx] = sector_factor;
-
-            let threshold = barriers[idx][period];
-
-            if value <= threshold {
-                defaulted[idx] = true;
-                default_time[idx] = Some((period as f64 + 1.0) * period_length);
-
-                let lgd_corr = config.systematic_lgd_correlations[sector_index];
-                match compute_loss(asset, sector_factor, lgd_corr, &mut rng) {
                     Ok((loss, recovery)) => {
                         loss_amounts[idx] = loss;
                         recovery_rates[idx] = recovery;
@@ -564,7 +600,47 @@ fn simulate_single_trial(
                 }
             }
         }
-    }
+    } else {
+        // Frailty: persistent (already AR(1)-coupled) factor, fresh idiosyncratic
+        // each period, first-passage against the pre-calibrated per-period barriers.
+        for period in 0..n_periods {
+            let factors = &all_factors[period][trial_id];
+
+            for (idx, asset) in assets.iter().enumerate() {
+                if defaulted[idx] {
+                    continue; // already defaulted in an earlier period
+                }
+
+                let sector_index = asset.sector_id as usize;
+                let sector_factor = factors.get_sector_factor(sector_index);
+
+                let intra_corr = correlation_structure.intra_sector_correlations[sector_index];
+                let sector_loading = intra_corr.sqrt();
+                let idio_loading = (1.0 - intra_corr).max(0.0).sqrt();
+                let idio = sample_standard_normal(&mut rng);
+
+                let value = sector_loading * sector_factor + idio_loading * idio;
+                asset_values[idx] = value;
+                factor_global[idx] = sector_factor;
+                factor_sector[idx] = sector_factor;
+
+                let threshold = barriers[idx][period];
+
+                if value <= threshold {
+                    defaulted[idx] = true;
+                    default_time[idx] = Some((period as f64 + 1.0) * period_length);
+
+                    let lgd_corr = config.systematic_lgd_correlations[sector_index];
+                    match compute_loss(asset, sector_factor, lgd_corr, &mut rng) {
+                        Ok((loss, recovery)) => {
+                            loss_amounts[idx] = loss;
+                            recovery_rates[idx] = recovery;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
     }
 
     // Build results
@@ -597,7 +673,9 @@ fn simulate_single_trial(
     let representative_factors = all_factors[0][trial_id].clone();
 
     Ok(TrialResult {
-        trial_id, total_loss, total_defaults,
+        trial_id,
+        total_loss,
+        total_defaults,
         systematic_factors: representative_factors,
         asset_results,
     })
@@ -610,7 +688,8 @@ fn compute_loss(
     systematic_lgd_correlation: f64,
     rng: &mut StdRng,
 ) -> Result<(f64, f64), PortfolioError> {
-    let (alpha, beta) = asset.get_lgd_beta_params()
+    let (alpha, beta) = asset
+        .get_lgd_beta_params()
         .map_err(|e| PortfolioError::SimulationError(e.to_string()))?;
 
     // Wrong-way risk: a downturn is a LOW sector factor (defaults fire in the
@@ -618,15 +697,15 @@ fn compute_loss(
     // factor for a positive `systematic_lgd_correlation` to mean "recoveries
     // fall — LGD rises — exactly when defaults cluster".
     let lgd_sys = -systematic_lgd_correlation * sector_factor;
-    let lgd_idio = (1.0 - systematic_lgd_correlation.powi(2)).max(0.0).sqrt()
-        * sample_standard_normal(rng);
+    let lgd_idio =
+        (1.0 - systematic_lgd_correlation.powi(2)).max(0.0).sqrt() * sample_standard_normal(rng);
     let lgd_normal = lgd_sys + lgd_idio;
 
     use crate::math_utils::normal_cdf;
     let lgd_uniform = normal_cdf(lgd_normal).clamp(1e-12, 1.0 - 1e-12);
 
-    let beta_dist = StatrsBeta::new(alpha, beta)
-        .map_err(|e| PortfolioError::SimulationError(e.to_string()))?;
+    let beta_dist =
+        StatrsBeta::new(alpha, beta).map_err(|e| PortfolioError::SimulationError(e.to_string()))?;
     let lgd_realized = beta_dist.inverse_cdf(lgd_uniform);
 
     Ok((lgd_realized * asset.exposure, 1.0 - lgd_realized))
@@ -641,14 +720,17 @@ fn validate_portfolio_inputs(
     assets: &[AssetData],
 ) -> Result<(), PortfolioError> {
     if assets.is_empty() {
-        return Err(PortfolioError::InvalidAssetData("No assets provided".to_string()));
+        return Err(PortfolioError::InvalidAssetData(
+            "No assets provided".to_string(),
+        ));
     }
     let max_sector_id = config.sector_names.len() as u32;
     for asset in assets {
         if asset.sector_id >= max_sector_id {
-            return Err(PortfolioError::InvalidAssetData(
-                format!("Asset {} has invalid sector_id {}", asset.asset_id, asset.sector_id)
-            ));
+            return Err(PortfolioError::InvalidAssetData(format!(
+                "Asset {} has invalid sector_id {}",
+                asset.asset_id, asset.sector_id
+            )));
         }
     }
     Ok(())
@@ -661,11 +743,17 @@ fn store_interim_results(
     batch_size: Option<usize>,
 ) -> Result<(), PortfolioError> {
     if output_path.is_empty() {
-        return Err(PortfolioError::StorageError("Empty output path".to_string()));
+        return Err(PortfolioError::StorageError(
+            "Empty output path".to_string(),
+        ));
     }
     crate::storage::write_simulation_results_to_parquet(
-        trial_results, output_path, sector_names, batch_size,
-    ).map_err(|e| PortfolioError::StorageError(e.to_string()))
+        trial_results,
+        output_path,
+        sector_names,
+        batch_size,
+    )
+    .map_err(|e| PortfolioError::StorageError(e.to_string()))
 }
 
 #[cfg(test)]
@@ -674,7 +762,8 @@ mod tests {
 
     #[test]
     fn test_asset_data_creation() {
-        let asset = AssetData::new(1, 0, 0.05, 0.6, 0.2, 1e6, "Technology".to_string(), None).unwrap();
+        let asset =
+            AssetData::new(1, 0, 0.05, 0.6, 0.2, 1e6, "Technology".to_string(), None).unwrap();
         assert_eq!(asset.asset_id, 1);
         assert!(asset.get_default_threshold() < 0.0);
     }
@@ -682,13 +771,32 @@ mod tests {
     #[test]
     fn test_asset_data_with_term_structure() {
         let ts = vec![0.01, 0.025, 0.04, 0.06];
-        let asset = AssetData::new(1, 0, 0.06, 0.6, 0.2, 1e6, "Tech".to_string(), Some(ts.clone())).unwrap();
+        let asset = AssetData::new(
+            1,
+            0,
+            0.06,
+            0.6,
+            0.2,
+            1e6,
+            "Tech".to_string(),
+            Some(ts.clone()),
+        )
+        .unwrap();
         assert_eq!(asset.pd_term_structure.as_ref().unwrap().len(), 4);
     }
 
     #[test]
     fn test_conditional_pd_flat() {
-        let asset = AssetData { asset_id: 0, sector_id: 0, pd: 0.10, lgd_mean: 0.5, lgd_std: 0.1, exposure: 1e6, sector_name: "A".into(), pd_term_structure: None };
+        let asset = AssetData {
+            asset_id: 0,
+            sector_id: 0,
+            pd: 0.10,
+            lgd_mean: 0.5,
+            lgd_std: 0.1,
+            exposure: 1e6,
+            sector_name: "A".into(),
+            pd_term_structure: None,
+        };
         // Single period: conditional PD == flat PD
         assert!((get_conditional_pd(&asset, 0, 1) - 0.10).abs() < 1e-12);
         // 4 periods: per-period PD < cumulative PD
@@ -699,8 +807,13 @@ mod tests {
     #[test]
     fn test_conditional_pd_term_structure() {
         let asset = AssetData {
-            asset_id: 0, sector_id: 0, pd: 0.10, lgd_mean: 0.5, lgd_std: 0.1,
-            exposure: 1e6, sector_name: "A".into(),
+            asset_id: 0,
+            sector_id: 0,
+            pd: 0.10,
+            lgd_mean: 0.5,
+            lgd_std: 0.1,
+            exposure: 1e6,
+            sector_name: "A".into(),
             pd_term_structure: Some(vec![0.02, 0.05, 0.08, 0.10]),
         };
         // Period 0: forward PD = cum[0] = 0.02
@@ -713,10 +826,12 @@ mod tests {
     #[test]
     fn test_portfolio_config_creation() {
         let config = PortfolioConfig::new(
-            vec![0.4, 0.3], vec![0.1, 0.1],
+            vec![0.4, 0.3],
+            vec![0.1, 0.1],
             vec!["Tech".to_string(), "Finance".to_string()],
             Some(vec![vec![1.0, 0.2], vec![0.2, 1.0]]),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(config.intra_sector_correlations.len(), 2);
         assert_eq!(config.systematic_lgd_correlations.len(), 2);
     }
