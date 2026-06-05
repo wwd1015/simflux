@@ -120,7 +120,8 @@ class BenchmarkRunner:
                       f"{current_result['memory_used_mb']:.1f}MB")
                 print(f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s, "
                       f"{numpy_result['memory_used_mb']:.1f}MB")
-                print(f"  Speedup: {speedup:.1f}x, Memory Efficiency: {1/memory_ratio:.1f}x")
+                mem_eff = (1 / memory_ratio) if memory_ratio else float("inf")
+                print(f"  Speedup: {speedup:.1f}x, Memory Efficiency: {mem_eff:.1f}x")
             
             results.append(result_entry)
         
@@ -145,7 +146,7 @@ class BenchmarkRunner:
             print(f"\nTesting {size_label}: {n_assets} assets × {n_paths:,} paths × {n_steps} steps")
             
             # Generate correlation matrix
-            correlation_matrix = sf.generate_correlation_matrix(
+            correlation_matrix = sf.utils.generate_correlation_matrix(
                 n=n_assets, correlation_strength=0.3, random_state=42
             )
             
@@ -197,7 +198,8 @@ class BenchmarkRunner:
                       f"{current_result['memory_used_mb']:.1f}MB")
                 print(f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s, "
                       f"{numpy_result['memory_used_mb']:.1f}MB") 
-                print(f"  Speedup: {speedup:.1f}x, Memory Efficiency: {1/memory_ratio:.1f}x")
+                mem_eff = (1 / memory_ratio) if memory_ratio else float("inf")
+                print(f"  Speedup: {speedup:.1f}x, Memory Efficiency: {mem_eff:.1f}x")
             
             results.append(result_entry)
         
@@ -262,7 +264,8 @@ class BenchmarkRunner:
                       f"{current_result['memory_used_mb']:.1f}MB")
                 print(f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s, "
                       f"{numpy_result['memory_used_mb']:.1f}MB")
-                print(f"  Speedup: {speedup:.1f}x, Memory Efficiency: {1/memory_ratio:.1f}x")
+                mem_eff = (1 / memory_ratio) if memory_ratio else float("inf")
+                print(f"  Speedup: {speedup:.1f}x, Memory Efficiency: {mem_eff:.1f}x")
             else:
                 if not current_result['success']:
                     print(f"  Current Backend Error: {current_result['error']}")

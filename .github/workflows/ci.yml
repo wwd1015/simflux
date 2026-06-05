@@ -76,6 +76,9 @@ jobs:
 
     - name: Run benchmarks (Ubuntu 3.12 only)
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      # Informational only — a benchmark hiccup must not gate the test job.
+      continue-on-error: true
       run: |
+        pip install psutil
         python benchmarks/performance_comparison.py > benchmark_results.txt
         cat benchmark_results.txt
