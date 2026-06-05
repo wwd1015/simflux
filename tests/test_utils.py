@@ -174,40 +174,23 @@ class TestStorageUtils:
         # Default config
         config = sf.StorageConfig()
         assert config.store_interim is False
-        assert config.format == "parquet"
-        
+        assert config.batch_size == 10000
+
         # Custom config
         config = sf.StorageConfig(
             store_interim=True,
             output_path="test.parquet",
-            compression="zstd"
+            batch_size=1234,
         )
         assert config.store_interim is True
         assert config.output_path == "test.parquet"
-        assert config.compression == "zstd"
-    
+        assert config.batch_size == 1234
+
     def test_parquet_results_analyzer_init(self):
         """Test ParquetResultsAnalyzer initialization."""
         # Test with non-existent path
         with pytest.raises(FileNotFoundError):
             sf.ParquetResultsAnalyzer("nonexistent_path.parquet")
-    
-    def test_parquet_schema_creation(self):
-        """Test Parquet schema creation function."""
-        from simflux.utils.storage import create_parquet_schema
-        
-        schema = create_parquet_schema()
-        assert schema is not None
-        
-        # Check that required fields are present
-        field_names = [field.name for field in schema]
-        required_fields = [
-            'trial_id', 'asset_id', 'sector', 'defaulted', 
-            'loss_amount', 'recovery_rate'
-        ]
-        
-        for field in required_fields:
-            assert field in field_names
 
 
 class TestCorrelationStructure:

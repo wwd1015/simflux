@@ -22,6 +22,11 @@ jobs:
 
     - name: Build wheels
       uses: PyO3/maturin-action@v1
+      # abi3 builds one forward-compatible cp312 wheel; allow building it even
+      # when the runner's discovered interpreter is newer than pyo3's max (e.g.
+      # Python 3.14 on the host), which previously aborted the build.
+      env:
+        PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
       with:
         args: --release --out dist --find-interpreter
         sccache: 'true'

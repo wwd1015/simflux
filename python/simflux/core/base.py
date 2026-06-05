@@ -2,12 +2,33 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Any, Callable
 
 
 @dataclass
 class SimulationConfig:
-    """Configuration for simulation runs."""
+    """Configuration for simulation runs.
+
+    Attributes
+    ----------
+    seed : int, optional
+        Seed for the random number generator.
+
+        Reproducibility is **within-backend**, not across backends.  Fixing a
+        seed makes a run repeatable on whichever backend produced it, but the
+        Rust and NumPy backends consume the seed through different RNG schemes
+        (Rust draws per-stream ``StdRng`` in parallel; NumPy draws a single
+        ``default_rng`` sequence).  The same seed therefore yields *different*
+        individual paths depending on which backend is installed — the two
+        agree only in distribution, which is exactly what the cross-validation
+        tests assert.
+    batch_size : int
+        Number of records buffered before flushing during interim storage.
+    memory_limit_gb : float, optional
+        Soft cap on estimated array allocation; ``None`` disables the check.
+    progress_callback : callable, optional
+        Invoked with a completion fraction in ``[0, 1]`` during long runs.
+    """
 
     seed: Optional[int] = None
     batch_size: int = 10000
@@ -22,7 +43,9 @@ class SimulationConfig:
             raise ValueError("memory_limit_gb must be positive")
 
 
-def check_memory(config: SimulationConfig, n_elements: int, element_bytes: int = 8) -> None:
+def check_memory(
+    config: SimulationConfig, n_elements: int, element_bytes: int = 8
+) -> None:
     """Check if estimated memory usage exceeds configured limit.
 
     Parameters
@@ -41,7 +64,7 @@ def check_memory(config: SimulationConfig, n_elements: int, element_bytes: int =
     """
     if config.memory_limit_gb is None:
         return
-    estimated_gb = (n_elements * element_bytes) / (1024 ** 3)
+    estimated_gb = (n_elements * element_bytes) / (1024**3)
     if estimated_gb > config.memory_limit_gb:
         raise MemoryError(
             f"Estimated memory usage ({estimated_gb:.2f} GB) exceeds limit "
@@ -74,34 +97,3 @@ class BaseSimulator(ABC):
     def validate_inputs(self, *args: Any, **kwargs: Any) -> None:
         """Validate simulation inputs. To be implemented by subclasses."""
         pass
-
-
-class SimulationResults:
-    """Container for simulation results with lazy loading capabilities."""
-
-    def __init__(self,
-                 summary_stats: Dict[str, Any],
-                 interim_data_path: Optional[str] = None) -> None:
-        self.summary_stats = summary_stats
-        self.interim_data_path = interim_data_path
-        self._interim_data: Optional[Any] = None
-
-    @property
-    def has_interim_data(self) -> bool:
-        """Check if interim data is available."""
-        return self.interim_data_path is not None
-
-    def get_summary(self) -> Dict[str, Any]:
-        """Get summary statistics."""
-        return self.summary_stats
-
-    def load_interim_data(self) -> Any:
-        """Load interim data on demand via ParquetResultsAnalyzer."""
-        if not self.has_interim_data:
-            raise ValueError("No interim data available")
-
-        if self._interim_data is None:
-            from ..utils.storage import ParquetResultsAnalyzer
-            self._interim_data = ParquetResultsAnalyzer(self.interim_data_path)
-
-        return self._interim_data

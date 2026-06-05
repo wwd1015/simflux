@@ -1,6 +1,6 @@
 [package]
 name = "simflux"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 
 [lib]
@@ -8,7 +8,10 @@ name = "simflux"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.23", features = ["extension-module"] }
+# abi3-py312: build a single forward-compatible wheel for CPython 3.12+ so wheel
+# builds don't break when a runner ships a Python newer than pyo3's max (the CI
+# --find-interpreter previously picked up 3.14, which pyo3 0.23 rejects).
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py312"] }
 numpy = "0.23"
 ndarray = "0.16"
 rand = "0.8"
@@ -20,10 +23,6 @@ thiserror = "2.0"
 
 arrow = "54.0"
 parquet = "54.0"
-
-[dependencies.pyo3-polars]
-version = "0.20"
-features = ["lazy"]
 
 [dev-dependencies]
 tempfile = "3"

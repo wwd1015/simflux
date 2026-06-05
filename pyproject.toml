@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "simflux"
-version = "0.1.0"
+version = "0.3.0"
 description = "High-performance financial simulation library with Rust backend"
 authors = [{name = "SimFlux Contributors"}]
 readme = "README.md"
@@ -56,6 +56,9 @@ target-version = ['py312']
 
 [tool.mypy]
 python_version = "3.12"
-warn_return_any = true
 warn_unused_configs = true
-strict = true
+ignore_missing_imports = true
+# Not strict: this is a partially-typed scientific codebase. mypy still catches
+# real type errors (bad assignments, attr/arg-type mismatches) but does not
+# demand full annotation coverage or flag every Any-return. Tightening back to
+# strict is tracked as a follow-up.

@@ -1,17 +1,28 @@
+// Deferred style/lint items (tracked for follow-up, not behavioural):
+// - the simulation entry points are inherently multi-parameter;
+// - several hot loops index parallel arrays by one shared counter;
+// - the pyo3 0.23 -> IntoPyObject migration (ToPyObject/new_bound/to_object) is
+//   a separate modernization task, so the deprecations are allowed for now.
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::unwrap_or_default)]
+#![allow(deprecated)]
+
 use pyo3::prelude::*;
 
-pub mod random;
-pub mod gbm;
-pub mod portfolio;
 pub mod correlation;
-pub mod storage;
+pub mod gbm;
 pub mod math_utils;
+pub mod portfolio;
+pub mod random;
+pub mod storage;
 
 use gbm::{
-    simulate_gbm_single, simulate_gbm_correlated,
-    simulate_gbm_time_varying_single, simulate_gbm_time_varying_correlated,
+    simulate_gbm_correlated, simulate_gbm_single, simulate_gbm_time_varying_correlated,
+    simulate_gbm_time_varying_single,
 };
-use portfolio::{simulate_portfolio_losses, PortfolioConfig, AssetData};
+use portfolio::{simulate_portfolio_losses, AssetData, PortfolioConfig};
 
 #[pyfunction]
 #[pyo3(name = "simulate_gbm", signature = (mu, sigma, s0, n_paths, n_steps, dt, seed=None))]
@@ -24,7 +35,9 @@ fn py_simulate_gbm(
     dt: f64,
     seed: Option<u64>,
 ) -> PyResult<Vec<Vec<f64>>> {
-    Ok(simulate_gbm_single(mu, sigma, s0, n_paths, n_steps, dt, seed))
+    Ok(simulate_gbm_single(
+        mu, sigma, s0, n_paths, n_steps, dt, seed,
+    ))
 }
 
 #[pyfunction]
@@ -40,11 +53,19 @@ fn py_simulate_gbm_multi(
     seed: Option<u64>,
 ) -> PyResult<Vec<Vec<Vec<f64>>>> {
     match simulate_gbm_correlated(
-        mu, sigma, s0, correlation_matrix,
-        n_paths, n_steps, dt, seed,
+        mu,
+        sigma,
+        s0,
+        correlation_matrix,
+        n_paths,
+        n_steps,
+        dt,
+        seed,
     ) {
         Ok(paths) => Ok(paths),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())),
+        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            e.to_string(),
+        )),
     }
 }
 
@@ -63,9 +84,16 @@ fn py_simulate_gbm_time_varying(
     seed: Option<u64>,
 ) -> PyResult<Vec<Vec<f64>>> {
     Ok(simulate_gbm_time_varying_single(
-        &mu_times, &mu_values,
-        &sigma_times, &sigma_values,
-        s0, n_paths, n_steps, dt, t_start, seed,
+        &mu_times,
+        &mu_values,
+        &sigma_times,
+        &sigma_values,
+        s0,
+        n_paths,
+        n_steps,
+        dt,
+        t_start,
+        seed,
     ))
 }
 
@@ -85,18 +113,27 @@ fn py_simulate_gbm_time_varying_correlated(
     seed: Option<u64>,
 ) -> PyResult<Vec<Vec<Vec<f64>>>> {
     match simulate_gbm_time_varying_correlated(
-        mu_times, mu_values,
-        sigma_times, sigma_values,
-        s0, correlation_matrix,
-        n_paths, n_steps, dt, t_start, seed,
+        mu_times,
+        mu_values,
+        sigma_times,
+        sigma_values,
+        s0,
+        correlation_matrix,
+        n_paths,
+        n_steps,
+        dt,
+        t_start,
+        seed,
     ) {
         Ok(paths) => Ok(paths),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())),
+        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            e.to_string(),
+        )),
     }
 }
 
 #[pyfunction]
-#[pyo3(name = "simulate_portfolio", signature = (config, assets, n_simulations, n_periods=1, period_length=1.0, seed=None, store_interim=None, output_path=None))]
+#[pyo3(name = "simulate_portfolio", signature = (config, assets, n_simulations, n_periods=1, period_length=1.0, default_timing="copula".to_string(), factor_phi=0.0, barriers=Vec::new(), seed=None, store_interim=None, output_path=None, batch_size=None))]
 fn py_simulate_portfolio(
     py: Python<'_>,
     config: PortfolioConfig,
@@ -104,9 +141,13 @@ fn py_simulate_portfolio(
     n_simulations: usize,
     n_periods: usize,
     period_length: f64,
+    default_timing: String,
+    factor_phi: f64,
+    barriers: Vec<Vec<f64>>,
     seed: Option<u64>,
     store_interim: Option<bool>,
     output_path: Option<String>,
+    batch_size: Option<usize>,
 ) -> PyResult<PyObject> {
     let results = simulate_portfolio_losses(
         &config,
@@ -114,14 +155,21 @@ fn py_simulate_portfolio(
         n_simulations,
         n_periods,
         period_length,
+        &default_timing,
+        factor_phi,
+        &barriers,
         seed,
         store_interim.unwrap_or(false),
-        output_path
+        output_path,
+        batch_size,
     );
 
     match results {
         Ok(simulation_results) => Ok(simulation_results.to_object(py)),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "{}",
+            e
+        ))),
     }
 }
 
@@ -130,7 +178,10 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_simulate_gbm, m)?)?;
     m.add_function(wrap_pyfunction!(py_simulate_gbm_multi, m)?)?;
     m.add_function(wrap_pyfunction!(py_simulate_gbm_time_varying, m)?)?;
-    m.add_function(wrap_pyfunction!(py_simulate_gbm_time_varying_correlated, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_simulate_gbm_time_varying_correlated,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_simulate_portfolio, m)?)?;
 
     m.add_class::<PortfolioConfig>()?;

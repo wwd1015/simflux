@@ -11,6 +11,7 @@ from typing import Any, Union, List, Optional, Tuple
 
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.engine import SimulationEngine
+from ..utils.random_utils import validate_correlation_matrix_strict
 
 
 def _linear_interpolate(t: float, times: np.ndarray, values: np.ndarray) -> float:
@@ -25,13 +26,15 @@ class TimeVaryingGBM(BaseSimulator):
     Simply provide time series arrays for mu and sigma values.
     """
 
-    def __init__(self,
-                 mu_times: Union[np.ndarray, List[float]],
-                 mu_values: Union[np.ndarray, List[float]],
-                 sigma_times: Union[np.ndarray, List[float]],
-                 sigma_values: Union[np.ndarray, List[float]],
-                 S0: float,
-                 config: Optional[SimulationConfig] = None) -> None:
+    def __init__(
+        self,
+        mu_times: Union[np.ndarray, List[float]],
+        mu_values: Union[np.ndarray, List[float]],
+        sigma_times: Union[np.ndarray, List[float]],
+        sigma_values: Union[np.ndarray, List[float]],
+        S0: float,
+        config: Optional[SimulationConfig] = None,
+    ) -> None:
         super().__init__(config)
         self.mu_times = np.asarray(mu_times)
         self.mu_values = np.asarray(mu_values)
@@ -40,25 +43,32 @@ class TimeVaryingGBM(BaseSimulator):
         self.S0 = S0
         self.engine = SimulationEngine(config)
 
+        self.validate_inputs()
+
+    def validate_inputs(self, *args: Any, **kwargs: Any) -> None:
+        """Validate the time-series inputs (construction-time contract).
+
+        Raises ``ValueError`` on mismatched series lengths.  Per-run dimension
+        checks (n_paths/n_steps/T) are owned by the engine seam.
+        """
         if len(self.mu_times) != len(self.mu_values):
             raise ValueError("mu_times and mu_values must have same length")
         if len(self.sigma_times) != len(self.sigma_values):
             raise ValueError("sigma_times and sigma_values must have same length")
 
-    def validate_inputs(self, *args: Any, **kwargs: Any) -> None:
-        """Construction-time validation only; simulation dims validated by engine."""
-        pass
-
     def get_parameters_at_time(self, t: float) -> Tuple[float, float]:
-        """Get mu and sigma values at time t."""
+        """Interpolate mu and sigma at time ``t`` for inspection.
+
+        Convenience/inspection helper.  The simulation does not call it: each
+        backend interpolates the schedule internally over its own time grid.
+        Use it to inspect the assumed parameters, not to predict the exact
+        values a given run will use.
+        """
         mu = _linear_interpolate(t, self.mu_times, self.mu_values)
         sigma = _linear_interpolate(t, self.sigma_times, self.sigma_values)
         return mu, sigma
 
-    def simulate(self,
-                 n_paths: int,
-                 n_steps: int,
-                 T: float) -> np.ndarray:
+    def simulate(self, n_paths: int, n_steps: int, T: float) -> np.ndarray:
         """
         Simulate time-varying GBM paths.
 
@@ -95,18 +105,20 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
     Simply provide time series for each asset's parameters.
     """
 
-    def __init__(self,
-                 mu_times: List[Union[np.ndarray, List[float]]],
-                 mu_values: List[Union[np.ndarray, List[float]]],
-                 sigma_times: List[Union[np.ndarray, List[float]]],
-                 sigma_values: List[Union[np.ndarray, List[float]]],
-                 S0: Union[np.ndarray, List[float]],
-                 correlation_matrix: np.ndarray,
-                 config: Optional[SimulationConfig] = None) -> None:
+    def __init__(
+        self,
+        mu_times: List[Union[np.ndarray, List[float]]],
+        mu_values: List[Union[np.ndarray, List[float]]],
+        sigma_times: List[Union[np.ndarray, List[float]]],
+        sigma_values: List[Union[np.ndarray, List[float]]],
+        S0: Union[np.ndarray, List[float]],
+        correlation_matrix: np.ndarray,
+        config: Optional[SimulationConfig] = None,
+    ) -> None:
         super().__init__(config)
         self.n_assets = len(S0)
         self.S0 = np.asarray(S0)
-        self.correlation_matrix = correlation_matrix
+        self.correlation_matrix = np.asarray(correlation_matrix, dtype=float)
         self.engine = SimulationEngine(config)
 
         self.mu_times = [np.asarray(times) for times in mu_times]
@@ -114,34 +126,44 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
         self.sigma_times = [np.asarray(times) for times in sigma_times]
         self.sigma_values = [np.asarray(values) for values in sigma_values]
 
+        self.validate_inputs()
+
+    def validate_inputs(self, *args: Any, **kwargs: Any) -> None:
+        """Validate per-asset series and the correlation matrix (construction-time).
+
+        Raises ``ValueError`` (never a raw ``LinAlgError``) on a missing series
+        or an invalid correlation matrix, matching every other simulator's error
+        mode.  Per-run dimension checks are owned by the engine seam.
+        """
         if len(self.mu_times) != self.n_assets:
             raise ValueError("Must provide mu time series for each asset")
         if len(self.sigma_times) != self.n_assets:
             raise ValueError("Must provide sigma time series for each asset")
-
-        # Validate Cholesky feasibility (actual decomposition done in engine)
-        np.linalg.cholesky(correlation_matrix)
-
-    def validate_inputs(self, *args: Any, **kwargs: Any) -> None:
-        """Construction-time validation only; simulation dims validated by engine."""
-        pass
+        validate_correlation_matrix_strict(
+            self.correlation_matrix, name="correlation_matrix"
+        )
 
     def get_parameters_at_time(self, t: float) -> Tuple[np.ndarray, np.ndarray]:
-        """Get mu and sigma vectors at time t."""
-        mu = np.array([
-            _linear_interpolate(t, self.mu_times[i], self.mu_values[i])
-            for i in range(self.n_assets)
-        ])
-        sigma = np.array([
-            _linear_interpolate(t, self.sigma_times[i], self.sigma_values[i])
-            for i in range(self.n_assets)
-        ])
+        """Interpolate mu and sigma vectors at time ``t`` for inspection.
+
+        Convenience/inspection helper; the simulation interpolates internally
+        per backend and does not call this.
+        """
+        mu = np.array(
+            [
+                _linear_interpolate(t, self.mu_times[i], self.mu_values[i])
+                for i in range(self.n_assets)
+            ]
+        )
+        sigma = np.array(
+            [
+                _linear_interpolate(t, self.sigma_times[i], self.sigma_values[i])
+                for i in range(self.n_assets)
+            ]
+        )
         return mu, sigma
 
-    def simulate(self,
-                 n_paths: int,
-                 n_steps: int,
-                 T: float) -> np.ndarray:
+    def simulate(self, n_paths: int, n_steps: int, T: float) -> np.ndarray:
         """
         Simulate multi-asset time-varying GBM paths.
 
@@ -150,8 +172,6 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
         np.ndarray
             Simulated paths of shape (n_paths, n_assets, n_steps + 1)
         """
-        self.validate_inputs(n_paths, n_steps, T)
-
         return self.engine.simulate_gbm_time_varying_correlated(
             mu_times=[t.tolist() for t in self.mu_times],
             mu_values=[v.tolist() for v in self.mu_values],

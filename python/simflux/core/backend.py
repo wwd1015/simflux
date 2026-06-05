@@ -21,7 +21,8 @@ class Backend:
     def is_available(cls) -> bool:
         if cls._available is None:
             try:
-                from simflux import _rust
+                from simflux import _rust  # type: ignore[attr-defined]
+
                 cls._rust = _rust
                 cls._available = True
             except ImportError:

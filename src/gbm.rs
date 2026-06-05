@@ -1,5 +1,5 @@
+use crate::correlation::{cholesky_decomposition, generate_correlated_normals, CorrelationError};
 use crate::random::{create_rng, sample_standard_normal};
-use crate::correlation::{generate_correlated_normals, cholesky_decomposition, CorrelationError};
 use rayon::prelude::*;
 
 /// Linear interpolation with clamping outside the provided time range.
@@ -73,38 +73,39 @@ pub fn simulate_gbm_correlated(
     let n_assets = mu.len();
 
     if sigma.len() != n_assets {
-        return Err(CorrelationError::InvalidMatrix(
-            format!("sigma length {} does not match mu length {}", sigma.len(), n_assets)
-        ));
+        return Err(CorrelationError::InvalidMatrix(format!(
+            "sigma length {} does not match mu length {}",
+            sigma.len(),
+            n_assets
+        )));
     }
     if s0.len() != n_assets {
-        return Err(CorrelationError::InvalidMatrix(
-            format!("s0 length {} does not match mu length {}", s0.len(), n_assets)
-        ));
+        return Err(CorrelationError::InvalidMatrix(format!(
+            "s0 length {} does not match mu length {}",
+            s0.len(),
+            n_assets
+        )));
     }
     if correlation_matrix.len() != n_assets {
-        return Err(CorrelationError::InvalidMatrix(
-            format!("correlation_matrix size {} does not match n_assets {}", correlation_matrix.len(), n_assets)
-        ));
+        return Err(CorrelationError::InvalidMatrix(format!(
+            "correlation_matrix size {} does not match n_assets {}",
+            correlation_matrix.len(),
+            n_assets
+        )));
     }
 
     // Precompute constants
-    let drift: Vec<f64> = mu.iter()
+    let drift: Vec<f64> = mu
+        .iter()
         .zip(sigma.iter())
         .map(|(&m, &s)| (m - 0.5 * s * s) * dt)
         .collect();
 
-    let vol_sqrt_dt: Vec<f64> = sigma.iter()
-        .map(|&s| s * dt.sqrt())
-        .collect();
+    let vol_sqrt_dt: Vec<f64> = sigma.iter().map(|&s| s * dt.sqrt()).collect();
 
     // Generate all correlated random numbers at once for efficiency
     let total_randoms = n_paths * n_steps;
-    let correlated_randoms = generate_correlated_normals(
-        total_randoms,
-        correlation_matrix,
-        seed,
-    )?;
+    let correlated_randoms = generate_correlated_normals(total_randoms, correlation_matrix, seed)?;
 
     // Simulate paths
     let paths = (0..n_paths)
@@ -125,7 +126,8 @@ pub fn simulate_gbm_correlated(
 
                 for asset_idx in 0..n_assets {
                     let dw = randoms[asset_idx];
-                    current_values[asset_idx] *= (drift[asset_idx] + vol_sqrt_dt[asset_idx] * dw).exp();
+                    current_values[asset_idx] *=
+                        (drift[asset_idx] + vol_sqrt_dt[asset_idx] * dw).exp();
                     paths[asset_idx].push(current_values[asset_idx]);
                 }
             }
@@ -203,12 +205,12 @@ pub fn simulate_gbm_time_varying_correlated(
 
     if mu_times.len() != n_assets || mu_values.len() != n_assets {
         return Err(CorrelationError::InvalidMatrix(
-            "mu_times/mu_values length must match number of assets".to_string()
+            "mu_times/mu_values length must match number of assets".to_string(),
         ));
     }
     if sigma_times.len() != n_assets || sigma_values.len() != n_assets {
         return Err(CorrelationError::InvalidMatrix(
-            "sigma_times/sigma_values length must match number of assets".to_string()
+            "sigma_times/sigma_values length must match number of assets".to_string(),
         ));
     }
 
@@ -278,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_gbm_single_basic() {
-        let paths = simulate_gbm_single(0.05, 0.2, 100.0, 10, 252, 1.0/252.0, Some(42));
+        let paths = simulate_gbm_single(0.05, 0.2, 100.0, 10, 252, 1.0 / 252.0, Some(42));
 
         assert_eq!(paths.len(), 10);
         assert_eq!(paths[0].len(), 253); // n_steps + 1
@@ -297,15 +299,19 @@ mod tests {
         let mu = vec![0.05, 0.03];
         let sigma = vec![0.2, 0.15];
         let s0 = vec![100.0, 50.0];
-        let correlation_matrix = vec![
-            vec![1.0, 0.3],
-            vec![0.3, 1.0]
-        ];
+        let correlation_matrix = vec![vec![1.0, 0.3], vec![0.3, 1.0]];
 
         let paths = simulate_gbm_correlated(
-            mu, sigma, s0, correlation_matrix,
-            5, 10, 1.0/252.0, Some(42)
-        ).unwrap();
+            mu,
+            sigma,
+            s0,
+            correlation_matrix,
+            5,
+            10,
+            1.0 / 252.0,
+            Some(42),
+        )
+        .unwrap();
 
         assert_eq!(paths.len(), 5); // n_paths
         assert_eq!(paths[0].len(), 2); // n_assets
@@ -320,10 +326,13 @@ mod tests {
     fn test_gbm_correlated_dimension_mismatch() {
         let result = simulate_gbm_correlated(
             vec![0.05, 0.03],
-            vec![0.2],  // wrong length
+            vec![0.2], // wrong length
             vec![100.0, 50.0],
             vec![vec![1.0, 0.3], vec![0.3, 1.0]],
-            5, 10, 1.0/252.0, Some(42),
+            5,
+            10,
+            1.0 / 252.0,
+            Some(42),
         );
         assert!(result.is_err());
     }
@@ -346,9 +355,16 @@ mod tests {
     #[test]
     fn test_time_varying_single() {
         let paths = simulate_gbm_time_varying_single(
-            &[0.0, 1.0], &[0.05, 0.05],
-            &[0.0, 1.0], &[0.2, 0.2],
-            100.0, 10, 50, 1.0/50.0, 0.0, Some(42),
+            &[0.0, 1.0],
+            &[0.05, 0.05],
+            &[0.0, 1.0],
+            &[0.2, 0.2],
+            100.0,
+            10,
+            50,
+            1.0 / 50.0,
+            0.0,
+            Some(42),
         );
         assert_eq!(paths.len(), 10);
         assert_eq!(paths[0].len(), 51);

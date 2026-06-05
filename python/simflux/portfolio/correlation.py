@@ -1,4 +1,12 @@
-"""Pure-Python two-factor correlation helpers used by the fallback backend."""
+"""Pure-Python two-factor correlation diagnostics and inspection helpers.
+
+These helpers let you *inspect* a two-factor correlation structure — build the
+full asset correlation matrix, read factor loadings, sample sector factors, and
+run structural validation.  They are NOT on the simulation hot path: the Rust
+backend and the NumPy fallback each derive their loadings and sector factors
+inline, so this module is for inspection/diagnostics rather than a drop-in
+replica of either backend.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +15,8 @@ from math import sqrt
 from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
+
+from ..utils.random_utils import safe_cholesky
 
 
 class CorrelationError(ValueError):
@@ -26,7 +36,15 @@ class SystematicFactors:
 
 
 class TwoFactorCorrelationStructure:
-    """Replicates the Rust two-factor correlation loading in pure Python."""
+    """Inspectable two-factor correlation structure (diagnostics helper).
+
+    Builds the full asset-by-asset correlation matrix, factor loadings, and
+    sampled sector factors for a two-factor model so they can be examined and
+    validated.  This is a standalone inspection tool — the production portfolio
+    simulation does not route through it (each backend computes its loadings and
+    factors inline), so treat its outputs as diagnostics rather than a guarantee
+    of bit-for-bit agreement with a running simulation.
+    """
 
     def __init__(
         self,
@@ -52,8 +70,12 @@ class TwoFactorCorrelationStructure:
         self.n_sectors = len(self.sector_sizes)
         self.n_assets = sum(self.sector_sizes)
 
-        self._sector_corr_matrix = self._build_sector_correlation_matrix(sector_correlation_matrix)
-        self._sector_cholesky = np.linalg.cholesky(self._sector_corr_matrix)
+        self._sector_corr_matrix = self._build_sector_correlation_matrix(
+            sector_correlation_matrix
+        )
+        self._sector_cholesky = safe_cholesky(
+            self._sector_corr_matrix, name="sector_correlation_matrix"
+        )
 
         self._asset_indices = self._build_asset_index_map()
 
@@ -65,7 +87,9 @@ class TwoFactorCorrelationStructure:
             raise ValueError("inter_sector_correlation must be between -1 and 1")
 
         if len(self.intra_sector_correlations) != len(self.sector_sizes):
-            raise ValueError("intra_sector_correlations and sector_sizes must have same length")
+            raise ValueError(
+                "intra_sector_correlations and sector_sizes must have same length"
+            )
 
         for corr in self.intra_sector_correlations:
             if not -1.0 <= corr <= 1.0:
@@ -85,7 +109,9 @@ class TwoFactorCorrelationStructure:
         else:
             matrix = np.asarray(sector_correlation_matrix, dtype=float)
             if matrix.shape != (n, n):
-                raise ValueError("sector_correlation_matrix must match number of sectors")
+                raise ValueError(
+                    "sector_correlation_matrix must match number of sectors"
+                )
 
         if not np.allclose(matrix, matrix.T, atol=1e-8):
             raise ValueError("sector_correlation_matrix must be symmetric")
@@ -115,7 +141,9 @@ class TwoFactorCorrelationStructure:
 
         for sector_id, corr in enumerate(self.intra_sector_correlations):
             sector_slice = self._asset_indices[sector_id]
-            block = self._build_intra_block(corr, sector_slice.stop - sector_slice.start)
+            block = self._build_intra_block(
+                corr, sector_slice.stop - sector_slice.start
+            )
             matrix[sector_slice, sector_slice] = block
 
         for i in range(self.n_sectors):
@@ -141,8 +169,10 @@ class TwoFactorCorrelationStructure:
 
         block = np.full(
             (
-                self._asset_indices[sector_i].stop - self._asset_indices[sector_i].start,
-                self._asset_indices[sector_j].stop - self._asset_indices[sector_j].start,
+                self._asset_indices[sector_i].stop
+                - self._asset_indices[sector_i].start,
+                self._asset_indices[sector_j].stop
+                - self._asset_indices[sector_j].start,
             ),
             cross_value,
             dtype=float,
@@ -170,14 +200,18 @@ class TwoFactorCorrelationStructure:
         for sector_id in range(self.n_sectors):
             sector_slice = self._asset_indices[sector_id]
             sector_loading = sqrt(max(0.0, self.intra_sector_correlations[sector_id]))
-            idio_loading = sqrt(max(0.0, 1.0 - self.intra_sector_correlations[sector_id]))
+            idio_loading = sqrt(
+                max(0.0, 1.0 - self.intra_sector_correlations[sector_id])
+            )
 
             loadings[sector_slice, sector_id] = sector_loading
             loadings[sector_slice, -1] = idio_loading
 
         return loadings
 
-    def generate_factors(self, n_simulations: int, seed: Optional[int] = None) -> List[SystematicFactors]:
+    def generate_factors(
+        self, n_simulations: int, seed: Optional[int] = None
+    ) -> List[SystematicFactors]:
         """Generate correlated sector factors via Cholesky sampling."""
 
         rng = np.random.default_rng(seed)
@@ -204,7 +238,9 @@ class TwoFactorCorrelationStructure:
             "diagonal_ones": bool(diagonal_ones),
             "bounds_valid": bool(bounds_valid),
             "positive_definite": positive_definite,
-            "structure_valid": bool(symmetric and diagonal_ones and bounds_valid and positive_definite),
+            "structure_valid": bool(
+                symmetric and diagonal_ones and bounds_valid and positive_definite
+            ),
         }
 
     def summary(self) -> Dict[str, object]:

@@ -4,12 +4,16 @@ import numpy as np
 import pandas as pd
 import warnings
 from math import erf, sqrt
-from typing import List, Optional, Dict, Any, Union
-from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any, Union, TypedDict, NotRequired
+from dataclasses import dataclass
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.backend import Backend, CORRELATION_TOLERANCE
 from ..utils.storage import StorageConfig, ParquetResultsAnalyzer
-from ..utils.random_utils import validate_correlation_matrix_strict, approx_norm_ppf
+from ..utils.random_utils import (
+    validate_correlation_matrix_strict,
+    approx_norm_ppf,
+    safe_cholesky,
+)
 
 
 @dataclass
@@ -36,6 +40,7 @@ class AssetData:
     intra_sector_correlation : Optional[float]
         Optional per-asset intra-sector correlation metadata
     """
+
     asset_id: int
     sector_id: int
     pd: float
@@ -69,10 +74,14 @@ class AssetData:
         if self.pd_term_structure is not None:
             for i, p in enumerate(self.pd_term_structure):
                 if not 0 <= p <= 1:
-                    raise ValueError(f"pd_term_structure[{i}] must be between 0 and 1, got {p}")
+                    raise ValueError(
+                        f"pd_term_structure[{i}] must be between 0 and 1, got {p}"
+                    )
             for i in range(1, len(self.pd_term_structure)):
                 if self.pd_term_structure[i] < self.pd_term_structure[i - 1] - 1e-10:
-                    raise ValueError("pd_term_structure must be non-decreasing (cumulative PDs)")
+                    raise ValueError(
+                        "pd_term_structure must be non-decreasing (cumulative PDs)"
+                    )
 
         # Validate Beta distribution parameters are feasible
         max_lgd_std = sqrt(self.lgd_mean * (1 - self.lgd_mean))
@@ -84,8 +93,11 @@ class AssetData:
             )
 
     @classmethod
-    def from_dataframe(cls, df: pd.DataFrame,
-                      sector_mapping: Optional[Dict[str, int]] = None) -> List['AssetData']:
+    def from_dataframe(
+        cls,
+        df: pd.DataFrame,  # type: ignore[name-defined]
+        sector_mapping: Optional[Dict[str, int]] = None,
+    ) -> List["AssetData"]:
         """
         Create list of AssetData from DataFrame.
 
@@ -101,41 +113,72 @@ class AssetData:
         List[AssetData]
             List of AssetData objects
         """
-        required_columns = ['asset_id', 'sector', 'pd', 'lgd_mean', 'lgd_std', 'exposure']
+        required_columns = [
+            "asset_id",
+            "sector",
+            "pd",
+            "lgd_mean",
+            "lgd_std",
+            "exposure",
+        ]
         missing_columns = set(required_columns) - set(df.columns)
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
 
         if sector_mapping is None:
-            unique_sectors = df['sector'].unique()
+            unique_sectors = df["sector"].unique()
             sector_mapping = {sector: i for i, sector in enumerate(unique_sectors)}
 
         assets = []
         for _, row in df.iterrows():
-            sector_name = str(row['sector'])
+            sector_name = str(row["sector"])
             sector_id = sector_mapping.get(sector_name)
             if sector_id is None:
                 raise ValueError(f"Unknown sector: {sector_name}")
 
             intra_corr = None
-            if 'intra_sector_correlation' in df.columns:
-                value = row['intra_sector_correlation']
+            if "intra_sector_correlation" in df.columns:
+                value = row["intra_sector_correlation"]
                 if pd.notna(value):
                     intra_corr = float(value)
 
             asset = cls(
-                asset_id=int(row['asset_id']),
+                asset_id=int(row["asset_id"]),
                 sector_id=sector_id,
-                pd=float(row['pd']),
-                lgd_mean=float(row['lgd_mean']),
-                lgd_std=float(row['lgd_std']),
-                exposure=float(row['exposure']),
+                pd=float(row["pd"]),
+                lgd_mean=float(row["lgd_mean"]),
+                lgd_std=float(row["lgd_std"]),
+                exposure=float(row["exposure"]),
                 sector_name=sector_name,
                 intra_sector_correlation=intra_corr,
             )
             assets.append(asset)
 
         return assets
+
+
+class PortfolioResult(TypedDict):
+    """Result contract returned by :meth:`TwoFactorPortfolio.simulate`.
+
+    Both the Rust backend and the NumPy fallback populate exactly these keys, so
+    a caller never has to know which backend ran.  ``analyzer`` is the only
+    storage-conditional key: it is present only when interim results were
+    persisted (``store_interim=True`` with an ``output_path`` and the Rust
+    backend available).
+    """
+
+    portfolio_statistics: Dict[str, float]
+    sector_statistics: Dict[str, Dict[str, float]]
+    n_trials: int
+    n_assets: int
+    n_sectors: int
+    sector_names: List[str]
+    n_periods: int
+    period_length: float
+    time_horizon: float
+    default_timing: str
+    factor_persistence: Optional[float]
+    analyzer: NotRequired[ParquetResultsAnalyzer]
 
 
 class TwoFactorPortfolio(BaseSimulator):
@@ -149,19 +192,33 @@ class TwoFactorPortfolio(BaseSimulator):
     - Beta-distributed loss given default with systematic correlation
     """
 
-    def __init__(self,
-                 assets: Union[List[AssetData], pd.DataFrame],
-                 intra_sector_correlations: Optional[Union[float, Dict[str, float]]] = None,
-                 sector_correlation_matrix: Optional[Union[np.ndarray, List[List[float]]]] = None,
-                 systematic_lgd_correlation: float = 0.3,
-                 config: Optional[SimulationConfig] = None) -> None:
+    def __init__(
+        self,
+        assets: Union[List[AssetData], pd.DataFrame],
+        intra_sector_correlations: Optional[Union[float, Dict[str, float]]] = None,
+        sector_correlation_matrix: Optional[
+            Union[np.ndarray, List[List[float]]]
+        ] = None,
+        systematic_lgd_correlation: Union[
+            float, List[float], Dict[str, float], str
+        ] = 0.3,
+        config: Optional[SimulationConfig] = None,
+    ) -> None:
+        """Construct a two-factor credit portfolio.
+
+        ``systematic_lgd_correlation`` accepts, in addition to a scalar:
+        a per-sector ``list``, a ``{sector_name: value}`` ``dict`` (missing
+        sectors default to 0.3), or the string ``"match_intra"`` — which sets
+        ``rho_lgd_s = sqrt(rho_intra_s)`` per sector so LGD's cycle-sensitivity
+        matches the default driver's (see methodology §2.10).
+        """
         super().__init__(config)
 
         if not Backend.is_available():
             warnings.warn(
                 "Rust backend not available. Portfolio simulation will use basic fallback. "
                 "For full functionality, install from binary wheel.",
-                RuntimeWarning
+                RuntimeWarning,
             )
 
         # Process assets input
@@ -174,7 +231,9 @@ class TwoFactorPortfolio(BaseSimulator):
             raise ValueError("No assets provided")
 
         # Build sector information
-        self.sector_names = sorted(list(set(asset.sector_name for asset in self.assets)))
+        self.sector_names = sorted(
+            list(set(asset.sector_name for asset in self.assets))
+        )
         self.sector_mapping = {name: i for i, name in enumerate(self.sector_names)}
 
         # Ensure consistent sector IDs
@@ -182,8 +241,6 @@ class TwoFactorPortfolio(BaseSimulator):
             asset.sector_id = self.sector_mapping[asset.sector_name]
 
         # Process correlation inputs
-        self.systematic_lgd_correlation = systematic_lgd_correlation
-
         if intra_sector_correlations is None:
             inferred_intra = self._infer_intra_correlations_from_assets()
             if inferred_intra is not None:
@@ -191,7 +248,9 @@ class TwoFactorPortfolio(BaseSimulator):
             else:
                 self.intra_sector_correlations = [0.4] * len(self.sector_names)
         elif isinstance(intra_sector_correlations, (int, float)):
-            self.intra_sector_correlations = [float(intra_sector_correlations)] * len(self.sector_names)
+            self.intra_sector_correlations = [float(intra_sector_correlations)] * len(
+                self.sector_names
+            )
         elif isinstance(intra_sector_correlations, dict):
             self.intra_sector_correlations = [
                 intra_sector_correlations.get(sector, 0.4)
@@ -200,33 +259,103 @@ class TwoFactorPortfolio(BaseSimulator):
         else:
             raise ValueError("intra_sector_correlations must be float or dict")
 
-        self.sector_correlation_matrix = self._prepare_sector_correlation_matrix(sector_correlation_matrix)
+        # Resolve LGD-systematic correlation to one value per sector.  Must run
+        # after intra_sector_correlations, because "match_intra" reads them.
+        self.systematic_lgd_correlations = self._resolve_systematic_lgd_correlations(
+            systematic_lgd_correlation
+        )
+
+        self.sector_correlation_matrix = self._prepare_sector_correlation_matrix(
+            sector_correlation_matrix
+        )
 
         self.validate_inputs()
 
+    @property
+    def systematic_lgd_correlation(self) -> Union[float, List[float]]:
+        """Backward-compatible scalar view of the per-sector LGD correlation.
+
+        Returns the single value when it is uniform across sectors (the common
+        case), otherwise the full per-sector list.  The canonical attribute is
+        ``systematic_lgd_correlations`` (plural).
+        """
+        vals = self.systematic_lgd_correlations
+        first = vals[0]
+        if all(v == first for v in vals):
+            return first
+        return list(vals)
+
+    def _resolve_systematic_lgd_correlations(
+        self, raw: Union[float, List[float], Dict[str, float], str]
+    ) -> List[float]:
+        """Resolve the LGD-systematic correlation input to one value per sector.
+
+        Accepts a scalar (broadcast), a per-sector list, a ``{sector: value}``
+        dict (missing sectors default to 0.3), or ``"match_intra"`` which sets
+        ``rho_lgd_s = sqrt(rho_intra_s)`` so LGD's cycle-sensitivity equals the
+        default driver's, sector by sector.
+        """
+        n = len(self.sector_names)
+        if isinstance(raw, str):
+            if raw != "match_intra":
+                raise ValueError(
+                    f"systematic_lgd_correlation string must be 'match_intra', got {raw!r}"
+                )
+            return [float(np.sqrt(max(0.0, c))) for c in self.intra_sector_correlations]
+        if isinstance(raw, bool):
+            raise ValueError("systematic_lgd_correlation must be numeric, not bool")
+        if isinstance(raw, (int, float)):
+            return [float(raw)] * n
+        if isinstance(raw, dict):
+            return [float(raw.get(sector, 0.3)) for sector in self.sector_names]
+        if isinstance(raw, (list, tuple, np.ndarray)):
+            vals = [float(v) for v in raw]
+            if len(vals) != n:
+                raise ValueError(
+                    "systematic_lgd_correlation list must have one value per "
+                    f"sector ({n}), got {len(vals)}"
+                )
+            return vals
+        raise ValueError(
+            "systematic_lgd_correlation must be a float, list, dict, or 'match_intra'"
+        )
+
     def validate_inputs(self) -> None:
         """Validate portfolio configuration."""
-        if not -1 <= self.systematic_lgd_correlation <= 1:
-            raise ValueError("systematic_lgd_correlation must be between -1 and 1")
+        for corr in self.systematic_lgd_correlations:
+            if not -1 <= corr <= 1:
+                raise ValueError("systematic_lgd_correlation must be between -1 and 1")
 
         for corr in self.intra_sector_correlations:
             if not 0 <= corr <= 1:
-                raise ValueError("All intra_sector_correlations must be between 0 and 1")
+                raise ValueError(
+                    "All intra_sector_correlations must be between 0 and 1"
+                )
 
+        # Require positive-definiteness (not merely PSD): the Rust backend's
+        # Cholesky rejects a singular matrix, so admitting one here would make the
+        # two backends diverge (Rust raises, NumPy repairs). Validating PD up
+        # front keeps the seam backend-independent and matches CorrelatedGBM /
+        # TimeVaryingCorrelatedGBM, which also require PD.
         validate_correlation_matrix_strict(
             self.sector_correlation_matrix,
             name="sector_correlation_matrix",
-            check_positive_definite=False,
+            check_positive_definite=True,
             pd_tolerance=CORRELATION_TOLERANCE,
         )
 
-        if self.sector_correlation_matrix.shape != (len(self.sector_names), len(self.sector_names)):
+        if self.sector_correlation_matrix.shape != (
+            len(self.sector_names),
+            len(self.sector_names),
+        ):
             raise ValueError("sector_correlation_matrix must match number of sectors")
 
         # Check that we have assets in each sector
         sector_counts: Dict[str, int] = {}
         for asset in self.assets:
-            sector_counts[asset.sector_name] = sector_counts.get(asset.sector_name, 0) + 1
+            sector_counts[asset.sector_name] = (
+                sector_counts.get(asset.sector_name, 0) + 1
+            )
 
         if len(sector_counts) != len(self.sector_names):
             raise ValueError("Some sectors have no assets")
@@ -237,7 +366,9 @@ class TwoFactorPortfolio(BaseSimulator):
         sector_values: Dict[str, List[float]] = {}
         for asset in self.assets:
             if asset.intra_sector_correlation is not None:
-                sector_values.setdefault(asset.sector_name, []).append(asset.intra_sector_correlation)
+                sector_values.setdefault(asset.sector_name, []).append(
+                    asset.intra_sector_correlation
+                )
 
         if not sector_values:
             return None
@@ -249,7 +380,9 @@ class TwoFactorPortfolio(BaseSimulator):
                 raise ValueError(
                     f"No intra-sector correlation provided for sector '{sector}'"
                 )
-            inferred.append(self._resolve_unique_value(values, f"intra correlation ({sector})"))
+            inferred.append(
+                self._resolve_unique_value(values, f"intra correlation ({sector})")
+            )
 
         return inferred
 
@@ -260,14 +393,14 @@ class TwoFactorPortfolio(BaseSimulator):
         base = float(values[0])
         for value in values[1:]:
             if abs(value - base) > 1e-6:
-                raise ValueError(
-                    f"Inconsistent values supplied for {label}: {values}"
-                )
+                raise ValueError(f"Inconsistent values supplied for {label}: {values}")
         if not -1 <= base <= 1:
             raise ValueError(f"{label} must lie between -1 and 1, got {base}")
         return base
 
-    def _prepare_sector_correlation_matrix(self, matrix: Optional[Union[np.ndarray, List[List[float]]]]) -> np.ndarray:
+    def _prepare_sector_correlation_matrix(
+        self, matrix: Optional[Union[np.ndarray, List[List[float]]]]
+    ) -> np.ndarray:
         """Return a valid sector correlation matrix."""
 
         n_sectors = len(self.sector_names)
@@ -279,11 +412,15 @@ class TwoFactorPortfolio(BaseSimulator):
             raise ValueError("sector_correlation_matrix must match number of sectors")
         return arr
 
-    def simulate(self,
-                 n_simulations: int,
-                 n_periods: int = 1,
-                 period_length: float = 1.0,
-                 storage_config: Optional[StorageConfig] = None) -> Dict[str, Any]:
+    def simulate(
+        self,
+        n_simulations: int,
+        n_periods: int = 1,
+        period_length: float = 1.0,
+        default_timing: str = "copula",
+        factor_persistence: float = 0.5,
+        storage_config: Optional[StorageConfig] = None,
+    ) -> "PortfolioResult":
         """
         Run portfolio loss simulation.
 
@@ -292,14 +429,45 @@ class TwoFactorPortfolio(BaseSimulator):
         n_simulations : int
             Number of Monte Carlo simulations.
         n_periods : int, default=1
-            Number of discrete time periods.  Each period gets independent
-            sector factor draws; an asset can default at most once across
-            all periods.  ``n_periods=1`` reproduces the classic single-period
-            model.  For quarterly simulation over 2 years use ``n_periods=8``.
+            Number of discrete time periods.  An asset can default at most once
+            across all periods.  ``n_periods=1`` reproduces the classic
+            single-period model.  For quarterly simulation over 2 years use
+            ``n_periods=8``.
         period_length : float, default=1.0
             Length of each period in years.  ``period_length=0.25`` for
             quarterly steps.  The total time horizon is
             ``n_periods * period_length``.
+        default_timing : {"copula", "frailty"}, default="copula"
+            How default *timing* is generated across periods (no effect when
+            ``n_periods == 1``, where the two coincide).  Both reproduce the
+            marginal cumulative PD term structure exactly; they differ in the
+            cross-period dependence of the systematic factor, and therefore in
+            the tail.
+
+            * ``"copula"`` — one-factor Gaussian copula of default *times*
+              (Li, 2000).  A single latent ``V = sqrt(rho)*F + sqrt(1-rho)*eps``
+              is drawn per obligor for the whole horizon and compared against the
+              *cumulative* threshold staircase ``tau_k = Phi^{-1}(cum_k)``;
+              default is the first crossing.  All uncertainty resolves at t=0
+              (maximal cross-period dependence; grid-invariant loss distribution).
+            * ``"frailty"`` — dynamic frailty (Duffie et al., 2009).  The
+              systematic factor is *persistent* (an AR(1) with annual
+              autocorrelation ``factor_persistence``), and fresh idiosyncratic
+              shocks arrive each period; defaults are conditionally independent
+              given the factor path.  The per-period default *barrier* is
+              calibrated so the marginal PD is preserved for any persistence (a
+              naive AR(1) on forward thresholds would bias it).  ``factor_persistence
+              = 0`` reduces to independent periods; ``= 1`` freezes the factor.
+
+            See methodology §2.6.
+        factor_persistence : float, default=0.5
+            **Frailty mode only.** Annual autocorrelation of the systematic
+            credit-cycle factor, in ``[0, 1]``; the per-period AR(1) coefficient
+            is ``factor_persistence ** period_length``.  The default ``0.5`` is a
+            cycle-realistic *illustrative* value — for production use, calibrate
+            it to data (e.g. an AR(1) fit to a probit-transformed default-rate
+            series); typical annual estimates are ~0.4–0.7.  Ignored by
+            ``"copula"``.
         storage_config : StorageConfig, optional
             Configuration for storing interim results.
 
@@ -310,14 +478,11 @@ class TwoFactorPortfolio(BaseSimulator):
 
         Notes
         -----
-        When ``n_periods > 1`` the per-period conditional PD is derived
-        automatically:
-
-        * If an asset has ``pd_term_structure`` (cumulative PDs at each period
-          end) the forward PD for each period is computed as
-          ``(cum[k] - cum[k-1]) / (1 - cum[k-1])``.
-        * Otherwise the flat ``pd`` field is spread across all periods assuming
-          a constant hazard rate: ``1 - (1 - pd)^(1/n_periods)``.
+        The cumulative PD at each period end comes from the asset's
+        ``pd_term_structure`` when provided, else from the flat ``pd`` under a
+        constant hazard (``cum_k = 1 - (1 - pd)^((k+1)/n_periods)``).  ``"copula"``
+        thresholds the cumulative directly; ``"frailty"`` calibrates a barrier per
+        period (see :mod:`simflux.portfolio.frailty`).
         """
         if n_simulations <= 0:
             raise ValueError("n_simulations must be positive")
@@ -325,20 +490,77 @@ class TwoFactorPortfolio(BaseSimulator):
             raise ValueError("n_periods must be positive")
         if period_length <= 0:
             raise ValueError("period_length must be positive")
+        if default_timing not in ("copula", "frailty"):
+            raise ValueError("default_timing must be 'copula' or 'frailty'")
+        if not 0.0 <= factor_persistence <= 1.0:
+            raise ValueError("factor_persistence must be between 0 and 1")
+
+        # A pd_term_structure longer than n_periods is a valid *sub-horizon* run:
+        # the simulation walks the first n_periods points of the curve, so a
+        # 4-period structure run at n_periods=1 measures default by the end of
+        # period 1 (cum[0]), not the full-horizon cumulative PD. Sweeping n_periods
+        # from 1..len over one fixed term structure is the intended use. A structure
+        # *shorter* than n_periods is under-specified — its last point is repeated
+        # for the remaining periods, which is a genuine approximation.
+        n_longer = sum(
+            1
+            for a in self.assets
+            if a.pd_term_structure is not None and len(a.pd_term_structure) > n_periods
+        )
+        n_shorter = sum(
+            1
+            for a in self.assets
+            if a.pd_term_structure is not None and len(a.pd_term_structure) < n_periods
+        )
+        if n_shorter:
+            raise RuntimeError(
+                f"pd_term_structure shorter than n_periods ({n_periods}) for {n_shorter} "
+                "asset(s): there is no cumulative PD for the later periods, so the horizon "
+                "is under-specified. Provide one cumulative PD per period "
+                "(len(pd_term_structure) >= n_periods)."
+            )
+        if n_longer:
+            warnings.warn(
+                f"pd_term_structure longer than n_periods ({n_periods}) for {n_longer} "
+                f"asset(s): running a sub-horizon, only the first {n_periods} cumulative-PD "
+                "point(s) are used. This is expected when sweeping n_periods over a fixed "
+                "term structure.",
+                UserWarning,
+            )
+
+        # Frailty mode: calibrate the per-period default barriers up front (once,
+        # shared by whichever backend runs) so the marginal PD is preserved.
+        factor_phi = 0.0
+        barriers = None
+        if default_timing == "frailty":
+            from .frailty import per_period_phi, barrier_matrix
+
+            factor_phi = (
+                per_period_phi(factor_persistence, period_length)
+                if n_periods > 1
+                else 0.0
+            )
+            cum_matrix = np.stack(
+                [self._get_cumulative_pds(k, n_periods) for k in range(n_periods)]
+            )
+            asset_rhos = np.array(self.intra_sector_correlations)[
+                np.array([a.sector_id for a in self.assets])
+            ]
+            barriers = barrier_matrix(cum_matrix, asset_rhos, factor_phi)
 
         store_interim = storage_config.store_interim if storage_config else False
         output_path = storage_config.output_path if storage_config else None
+        batch_size = storage_config.batch_size if storage_config else None
 
         if Backend.is_available():
             _rust = Backend.get_rust()
             rust_assets = [self._convert_asset_to_rust(asset) for asset in self.assets]
-            off_diag = self.sector_correlation_matrix[np.triu_indices(len(self.sector_names), 1)]
-            avg_inter_sector = float(np.mean(off_diag)) if off_diag.size > 0 else 0.0
 
+            # The full sector correlation matrix is the single source of truth for
+            # cross-sector coupling; no scalar summary rides the seam.
             rust_config = _rust.PortfolioConfig(
-                inter_sector_correlation=avg_inter_sector,
                 intra_sector_correlations=self.intra_sector_correlations,
-                systematic_lgd_correlation=self.systematic_lgd_correlation,
+                systematic_lgd_correlations=self.systematic_lgd_correlations,
                 sector_names=self.sector_names,
                 sector_correlation_matrix=self.sector_correlation_matrix.tolist(),
             )
@@ -350,39 +572,55 @@ class TwoFactorPortfolio(BaseSimulator):
                     n_simulations=n_simulations,
                     n_periods=n_periods,
                     period_length=period_length,
+                    default_timing=default_timing,
+                    factor_phi=factor_phi,
+                    barriers=(barriers.T.tolist() if barriers is not None else []),
                     seed=self.config.seed,
                     store_interim=store_interim,
-                    output_path=output_path
+                    output_path=output_path,
+                    batch_size=batch_size,
                 )
             except RuntimeError as exc:
                 if store_interim:
                     raise RuntimeError(
                         "Interim storage via the Rust backend is not available; disable "
-                        "store_interim or run in Python fallback mode.") from exc
+                        "store_interim or run in Python fallback mode."
+                    ) from exc
                 raise
         else:
             if store_interim:
                 warnings.warn(
                     "Interim storage requires the Rust backend; proceeding without persistence.",
-                    RuntimeWarning
+                    RuntimeWarning,
                 )
             results = self._fallback_simulate_portfolio(
                 n_simulations=n_simulations,
                 n_periods=n_periods,
                 period_length=period_length,
+                default_timing=default_timing,
+                factor_phi=factor_phi,
+                barriers=barriers,
             )
 
-        # Add metadata
-        results['n_assets'] = len(self.assets)
-        results['n_sectors'] = len(self.sector_names)
-        results['sector_names'] = self.sector_names
-        results['n_periods'] = n_periods
-        results['period_length'] = period_length
-        results['time_horizon'] = n_periods * period_length
+        # Stamp the result contract uniformly so both backends return the same
+        # key set regardless of install state (see PortfolioResult).  n_trials is
+        # stamped here rather than read from a backend dict so it can never go
+        # missing on the NumPy fallback.
+        results["n_trials"] = n_simulations
+        results["n_assets"] = len(self.assets)
+        results["n_sectors"] = len(self.sector_names)
+        results["sector_names"] = self.sector_names
+        results["n_periods"] = n_periods
+        results["period_length"] = period_length
+        results["time_horizon"] = n_periods * period_length
+        results["default_timing"] = default_timing
+        results["factor_persistence"] = (
+            factor_persistence if default_timing == "frailty" else None
+        )
 
         # Create analyzer if interim data is available
         if store_interim and output_path and Backend.is_available():
-            results['analyzer'] = ParquetResultsAnalyzer(output_path)
+            results["analyzer"] = ParquetResultsAnalyzer(output_path)
 
         return results
 
@@ -423,31 +661,65 @@ class TwoFactorPortfolio(BaseSimulator):
         return 1.0 - (1.0 - pd) ** (1.0 / n_periods)
 
     def _get_conditional_pds(self, period: int, n_periods: int) -> np.ndarray:
-        """Return an array of per-asset conditional PDs for a given period."""
+        """Return an array of per-asset conditional (forward) PDs for a period."""
         result = np.empty(len(self.assets))
         for i, a in enumerate(self.assets):
             if a.pd_term_structure is not None and len(a.pd_term_structure) > 0:
-                result[i] = self._conditional_pd_from_term_structure(a.pd_term_structure, period)
+                result[i] = self._conditional_pd_from_term_structure(
+                    a.pd_term_structure, period
+                )
             else:
                 result[i] = self._conditional_pd_flat(a.pd, n_periods)
+        return result
+
+    @staticmethod
+    def _cumulative_pd_from_term_structure(ts: List[float], period: int) -> float:
+        idx = min(period, len(ts) - 1)
+        return max(0.0, min(1.0, ts[idx]))
+
+    @staticmethod
+    def _cumulative_pd_flat(pd: float, n_periods: int, period: int) -> float:
+        # Cumulative PD by the end of period ``period`` (0-indexed) under a
+        # constant hazard, so that the final period returns ``pd`` exactly.
+        return 1.0 - (1.0 - pd) ** ((period + 1) / n_periods)
+
+    def _get_cumulative_pds(self, period: int, n_periods: int) -> np.ndarray:
+        """Return an array of per-asset *cumulative* PDs by a period's end."""
+        result = np.empty(len(self.assets))
+        for i, a in enumerate(self.assets):
+            if a.pd_term_structure is not None and len(a.pd_term_structure) > 0:
+                result[i] = self._cumulative_pd_from_term_structure(
+                    a.pd_term_structure, period
+                )
+            else:
+                result[i] = self._cumulative_pd_flat(a.pd, n_periods, period)
         return result
 
     # ------------------------------------------------------------------
     # NumPy fallback
     # ------------------------------------------------------------------
 
-    def _fallback_simulate_portfolio(self, n_simulations: int,
-                                     n_periods: int = 1,
-                                     period_length: float = 1.0) -> Dict[str, Any]:
+    def _fallback_simulate_portfolio(
+        self,
+        n_simulations: int,
+        n_periods: int = 1,
+        period_length: float = 1.0,
+        default_timing: str = "copula",
+        factor_phi: float = 0.0,
+        barriers: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
         """Fallback portfolio simulation using vectorized NumPy (no Rust)."""
         try:
             from scipy import stats as scipy_stats
             from scipy.special import erf as scipy_erf
+
             norm_ppf = scipy_stats.norm.ppf
             beta_ppf = scipy_stats.beta.ppf
             erf_func = scipy_erf
         except ImportError:
-            warnings.warn("scipy not available, using approximate calculations", UserWarning)
+            warnings.warn(
+                "scipy not available, using approximate calculations", UserWarning
+            )
 
             norm_ppf = approx_norm_ppf
             beta_ppf = None
@@ -462,10 +734,9 @@ class TwoFactorPortfolio(BaseSimulator):
 
         self._check_memory(n_simulations * n_periods * (n_sectors + 2 * n_assets))
 
-        try:
-            sector_cholesky = np.linalg.cholesky(self.sector_correlation_matrix)
-        except np.linalg.LinAlgError as exc:
-            raise ValueError("Inter-sector correlation matrix is not positive semi-definite") from exc
+        sector_cholesky = safe_cholesky(
+            self.sector_correlation_matrix, name="sector_correlation_matrix"
+        )
 
         asset_sector_ids = np.array([a.sector_id for a in self.assets])
         asset_lgd_means = np.array([a.lgd_mean for a in self.assets])
@@ -477,48 +748,104 @@ class TwoFactorPortfolio(BaseSimulator):
         sector_loadings = np.sqrt(asset_intra_corrs)
         idio_loadings = np.sqrt(np.maximum(0.0, 1 - asset_intra_corrs))
 
-        lgd_alpha = asset_lgd_means * ((asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1)
-        lgd_beta_param = (1 - asset_lgd_means) * ((asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1)
+        # Per-sector LGD-systematic correlation, expanded to one value per asset.
+        asset_lgd_corrs = np.array(self.systematic_lgd_correlations)[asset_sector_ids]
+        lgd_idio_scale = np.sqrt(np.maximum(0.0, 1 - asset_lgd_corrs**2))
 
-        # Track per-simulation, per-asset state
-        ever_defaulted = np.zeros((n_simulations, n_assets), dtype=bool)
+        lgd_alpha = asset_lgd_means * (
+            (asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1
+        )
+        lgd_beta_param = (1 - asset_lgd_means) * (
+            (asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1
+        )
+
+        def _lgd_from_normal(lgd_normal: np.ndarray) -> np.ndarray:
+            """Map a standard-normal LGD driver through the Gaussian copula to a
+            Beta-distributed realized LGD (uniform-clipped when scipy absent)."""
+            lgd_uniform = np.clip(
+                0.5 * (1 + erf_func(lgd_normal / np.sqrt(2))), 1e-12, 1 - 1e-12
+            )
+            if beta_ppf is not None:
+                return beta_ppf(
+                    lgd_uniform, lgd_alpha[np.newaxis, :], lgd_beta_param[np.newaxis, :]
+                )
+            return np.clip(lgd_uniform, 1e-3, 1 - 1e-3)
+
         losses = np.zeros((n_simulations, n_assets))
 
-        for period in range(n_periods):
-            cond_pds = self._get_conditional_pds(period, n_periods)
-            thresholds = norm_ppf(cond_pds)
+        if default_timing == "copula":
+            # One-factor Gaussian copula of default *times* (Li, 2000): a single
+            # latent V per obligor for the whole horizon, thresholded against the
+            # cumulative PD.  Default by horizon <=> V <= Phi^{-1}(cum_final); the
+            # marginal cumulative PD is reproduced exactly for any correlation.
+            cum_final = self._get_cumulative_pds(n_periods - 1, n_periods)
+            final_threshold = norm_ppf(cum_final)
 
-            # Independent sector factors per period
-            independent = rng.normal(size=(n_simulations, n_sectors))
-            sector_factor_all = independent @ sector_cholesky.T
-            asset_sector_factors = sector_factor_all[:, asset_sector_ids]
-
-            idiosyncratic = rng.normal(size=(n_simulations, n_assets))
-            asset_values = (
-                sector_loadings[np.newaxis, :] * asset_sector_factors +
-                idio_loadings[np.newaxis, :] * idiosyncratic
+            sector_factor_all = (
+                rng.normal(size=(n_simulations, n_sectors)) @ sector_cholesky.T
             )
+            asset_sector_factors = sector_factor_all[:, asset_sector_ids]
+            idiosyncratic = rng.normal(size=(n_simulations, n_assets))
+            latent = (
+                sector_loadings[np.newaxis, :] * asset_sector_factors
+                + idio_loadings[np.newaxis, :] * idiosyncratic
+            )
+            defaulted = latent <= final_threshold[np.newaxis, :]
 
-            # Default check: only for surviving assets
-            new_defaults = (asset_values <= thresholds[np.newaxis, :]) & ~ever_defaulted
-
-            if np.any(new_defaults):
-                # Compute LGD for newly defaulted assets
-                lgd_sys = self.systematic_lgd_correlation * asset_sector_factors
-                lgd_idio_scale = max(0.0, 1 - self.systematic_lgd_correlation ** 2) ** 0.5
-                lgd_idio = lgd_idio_scale * rng.normal(size=(n_simulations, n_assets))
-                lgd_normal = lgd_sys + lgd_idio
-                lgd_uniform = np.clip(0.5 * (1 + erf_func(lgd_normal / np.sqrt(2))), 1e-12, 1 - 1e-12)
-
-                if beta_ppf is not None:
-                    lgd_realized = beta_ppf(lgd_uniform, lgd_alpha[np.newaxis, :], lgd_beta_param[np.newaxis, :])
+            if np.any(defaulted):
+                lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
+                lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(
+                    size=(n_simulations, n_assets)
+                )
+                lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
+                losses = np.where(
+                    defaulted, lgd_realized * asset_exposures[np.newaxis, :], 0.0
+                )
+        else:
+            # Dynamic frailty: a persistent (AR(1)) systematic factor with fresh
+            # idiosyncratic shocks each period; first-passage against the
+            # pre-calibrated barriers (which preserve the marginal PD for any phi).
+            assert barriers is not None  # always computed for default_timing="frailty"
+            sqrt_innov = (max(0.0, 1.0 - factor_phi**2)) ** 0.5
+            prev_factor: Optional[np.ndarray] = None
+            ever_defaulted = np.zeros((n_simulations, n_assets), dtype=bool)
+            for period in range(n_periods):
+                innovation = (
+                    rng.normal(size=(n_simulations, n_sectors)) @ sector_cholesky.T
+                )
+                if prev_factor is None:
+                    sector_factor_all = innovation
                 else:
-                    lgd_realized = np.clip(lgd_uniform, 1e-3, 1 - 1e-3)
+                    sector_factor_all = (
+                        factor_phi * prev_factor + sqrt_innov * innovation
+                    )
+                prev_factor = sector_factor_all
+                asset_sector_factors = sector_factor_all[:, asset_sector_ids]
 
-                period_losses = lgd_realized * asset_exposures[np.newaxis, :]
-                losses = np.where(new_defaults, period_losses, losses)
+                idiosyncratic = rng.normal(size=(n_simulations, n_assets))
+                asset_values = (
+                    sector_loadings[np.newaxis, :] * asset_sector_factors
+                    + idio_loadings[np.newaxis, :] * idiosyncratic
+                )
 
-            ever_defaulted |= new_defaults
+                thresholds = barriers[period]  # (n_assets,) calibrated barrier
+                new_defaults = (
+                    asset_values <= thresholds[np.newaxis, :]
+                ) & ~ever_defaulted
+
+                if np.any(new_defaults):
+                    # Wrong-way risk: LGD loads on the NEGATIVE of the (per-sector)
+                    # factor, so positive systematic_lgd_correlation => higher LGD
+                    # in stress.
+                    lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
+                    lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(
+                        size=(n_simulations, n_assets)
+                    )
+                    lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
+                    period_losses = lgd_realized * asset_exposures[np.newaxis, :]
+                    losses = np.where(new_defaults, period_losses, losses)
+
+                ever_defaulted |= new_defaults
 
         total_losses = losses.sum(axis=1)
 
@@ -530,19 +857,21 @@ class TwoFactorPortfolio(BaseSimulator):
         def calculate_stats(loss_arr: np.ndarray) -> Dict[str, float]:
             p95, p99, p999 = np.percentile(loss_arr, [95, 99, 99.9])
             return {
-                'mean': float(np.mean(loss_arr)),
-                'std_dev': float(np.std(loss_arr)),
-                'var_95': float(p95),
-                'var_99': float(p99),
-                'var_999': float(p999),
-                'expected_shortfall_95': float(np.mean(loss_arr[loss_arr >= p95])),
-                'expected_shortfall_99': float(np.mean(loss_arr[loss_arr >= p99])),
-                'max_loss': float(np.max(loss_arr))
+                "mean": float(np.mean(loss_arr)),
+                "std_dev": float(np.std(loss_arr)),
+                "var_95": float(p95),
+                "var_99": float(p99),
+                "var_999": float(p999),
+                "expected_shortfall_95": float(np.mean(loss_arr[loss_arr >= p95])),
+                "expected_shortfall_99": float(np.mean(loss_arr[loss_arr >= p99])),
+                "max_loss": float(np.max(loss_arr)),
             }
 
         return {
-            'portfolio_statistics': calculate_stats(total_losses),
-            'sector_statistics': {s: calculate_stats(l) for s, l in sector_losses.items()},
+            "portfolio_statistics": calculate_stats(total_losses),
+            "sector_statistics": {
+                s: calculate_stats(loss) for s, loss in sector_losses.items()
+            },
         }
 
     def get_portfolio_summary(self) -> Dict[str, Any]:
@@ -558,32 +887,38 @@ class TwoFactorPortfolio(BaseSimulator):
             sector_avg_pd = np.mean([a.pd for a in sector_assets])
 
             sector_summary[sector_name] = {
-                'n_assets': len(sector_assets),
-                'total_exposure': sector_exposure,
-                'exposure_pct': sector_exposure / total_exposure * 100,
-                'avg_pd': sector_avg_pd,
-                'avg_lgd': np.mean([a.lgd_mean for a in sector_assets])
+                "n_assets": len(sector_assets),
+                "total_exposure": sector_exposure,
+                "exposure_pct": sector_exposure / total_exposure * 100,
+                "avg_pd": sector_avg_pd,
+                "avg_lgd": np.mean([a.lgd_mean for a in sector_assets]),
             }
 
         return {
-            'n_assets': len(self.assets),
-            'n_sectors': len(self.sector_names),
-            'total_exposure': total_exposure,
-            'avg_pd': avg_pd,
-            'avg_lgd': avg_lgd,
-            'sectors': sector_summary,
-            'correlation_structure': {
-                'sector_matrix': self.sector_correlation_matrix.tolist(),
-                'intra_sector': dict(zip(self.sector_names, self.intra_sector_correlations)),
-                'systematic_lgd': self.systematic_lgd_correlation
-            }
+            "n_assets": len(self.assets),
+            "n_sectors": len(self.sector_names),
+            "total_exposure": total_exposure,
+            "avg_pd": avg_pd,
+            "avg_lgd": avg_lgd,
+            "sectors": sector_summary,
+            "correlation_structure": {
+                "sector_matrix": self.sector_correlation_matrix.tolist(),
+                "intra_sector": dict(
+                    zip(self.sector_names, self.intra_sector_correlations)
+                ),
+                "systematic_lgd": dict(
+                    zip(self.sector_names, self.systematic_lgd_correlations)
+                ),
+            },
         }
 
     @classmethod
-    def create_sample_portfolio(cls,
-                              n_assets_per_sector: Union[int, List[int]] = 100,
-                              sectors: List[str] = None,
-                              **kwargs: Any) -> 'TwoFactorPortfolio':
+    def create_sample_portfolio(
+        cls,
+        n_assets_per_sector: Union[int, List[int]] = 100,
+        sectors: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> "TwoFactorPortfolio":
         """
         Create a sample portfolio for testing.
 
@@ -600,7 +935,7 @@ class TwoFactorPortfolio(BaseSimulator):
             not provided.
         """
         if sectors is None:
-            sectors = ['Technology', 'Finance', 'Healthcare']
+            sectors = ["Technology", "Finance", "Healthcare"]
 
         if isinstance(n_assets_per_sector, int):
             n_assets_per_sector = [n_assets_per_sector] * len(sectors)
@@ -608,27 +943,33 @@ class TwoFactorPortfolio(BaseSimulator):
         if len(n_assets_per_sector) != len(sectors):
             raise ValueError("n_assets_per_sector must match number of sectors")
 
-        inter_sector_correlation = kwargs.pop('inter_sector_correlation', None)
+        inter_sector_correlation = kwargs.pop("inter_sector_correlation", None)
 
         assets = []
         asset_id = 0
 
         sector_params = {
-            'Technology': {'pd_mean': 0.02, 'pd_std': 0.01, 'lgd_mean': 0.65},
-            'Finance': {'pd_mean': 0.05, 'pd_std': 0.02, 'lgd_mean': 0.45},
-            'Healthcare': {'pd_mean': 0.03, 'pd_std': 0.015, 'lgd_mean': 0.55},
-            'Energy': {'pd_mean': 0.08, 'pd_std': 0.03, 'lgd_mean': 0.70},
-            'Utilities': {'pd_mean': 0.025, 'pd_std': 0.01, 'lgd_mean': 0.40}
+            "Technology": {"pd_mean": 0.02, "pd_std": 0.01, "lgd_mean": 0.65},
+            "Finance": {"pd_mean": 0.05, "pd_std": 0.02, "lgd_mean": 0.45},
+            "Healthcare": {"pd_mean": 0.03, "pd_std": 0.015, "lgd_mean": 0.55},
+            "Energy": {"pd_mean": 0.08, "pd_std": 0.03, "lgd_mean": 0.70},
+            "Utilities": {"pd_mean": 0.025, "pd_std": 0.01, "lgd_mean": 0.40},
         }
 
         rng = np.random.default_rng(42)
 
-        for sector_idx, (sector, n_assets) in enumerate(zip(sectors, n_assets_per_sector)):
-            params = sector_params.get(sector, {'pd_mean': 0.04, 'pd_std': 0.02, 'lgd_mean': 0.60})
+        for sector_idx, (sector, n_assets) in enumerate(
+            zip(sectors, n_assets_per_sector)
+        ):
+            params = sector_params.get(
+                sector, {"pd_mean": 0.04, "pd_std": 0.02, "lgd_mean": 0.60}
+            )
 
             for i in range(n_assets):
-                pd_val = max(0.001, min(0.999, rng.normal(params['pd_mean'], params['pd_std'])))
-                lgd_mean = max(0.1, min(0.9, rng.normal(params['lgd_mean'], 0.15)))
+                pd_val = max(
+                    0.001, min(0.999, rng.normal(params["pd_mean"], params["pd_std"]))
+                )
+                lgd_mean = max(0.1, min(0.9, rng.normal(params["lgd_mean"], 0.15)))
                 lgd_std = rng.uniform(0.05, 0.15)
                 exposure = rng.lognormal(13, 1)
 
@@ -639,15 +980,19 @@ class TwoFactorPortfolio(BaseSimulator):
                     lgd_mean=lgd_mean,
                     lgd_std=lgd_std,
                     exposure=exposure,
-                    sector_name=sector
+                    sector_name=sector,
                 )
                 assets.append(asset)
                 asset_id += 1
 
-        if 'sector_correlation_matrix' not in kwargs:
-            base_corr = inter_sector_correlation if inter_sector_correlation is not None else 0.15
+        if "sector_correlation_matrix" not in kwargs:
+            base_corr = (
+                inter_sector_correlation
+                if inter_sector_correlation is not None
+                else 0.15
+            )
             matrix = np.full((len(sectors), len(sectors)), base_corr)
             np.fill_diagonal(matrix, 1.0)
-            kwargs['sector_correlation_matrix'] = matrix
+            kwargs["sector_correlation_matrix"] = matrix
 
         return cls(assets, **kwargs)

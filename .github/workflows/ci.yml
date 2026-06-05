@@ -65,13 +65,20 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install maturin pytest pytest-benchmark
-        maturin develop --release
+        # `maturin develop` needs an active virtualenv (absent on CI runners);
+        # build a release wheel and install it instead. abi3 makes the cp312
+        # wheel install on 3.12 and 3.13 alike.
+        maturin build --release --out dist
+        pip install --find-links dist simflux
 
     - name: Run tests
       run: pytest tests/ -v --benchmark-skip
 
     - name: Run benchmarks (Ubuntu 3.12 only)
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      # Informational only — a benchmark hiccup must not gate the test job.
+      continue-on-error: true
       run: |
+        pip install psutil
         python benchmarks/performance_comparison.py > benchmark_results.txt
         cat benchmark_results.txt
