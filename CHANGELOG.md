@@ -6,6 +6,8 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-04
+
 ### Changed
 
 - **Interim storage is now sparse (defaults-only), cutting peak memory.** With
@@ -36,7 +38,8 @@ contain breaking changes.
   for realized LGD, ignoring `lgd_mean` and overstating loss behind only a
   `UserWarning`. It now maps the LGD driver through a dependency-free, tabulated
   Beta inverse-CDF (`simflux.utils.special.beta_ppf`) that matches
-  `scipy.stats.beta.ppf` to ≤1e-5. New `tests/test_special.py`.
+  `scipy.stats.beta.ppf` to ~1e-4 (≤1e-5 for typical LGD Beta parameters). New
+  `tests/test_special.py`.
 
 ## [0.3.0] — 2026-06-03
 
