@@ -6,6 +6,41 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-04
+
+### Changed
+
+- **Interim storage is now sparse (defaults-only), cutting peak memory.** With
+  `store_interim=false` the Rust backend no longer materializes a per-asset
+  result for every asset-trial — each trial reduces to its total loss and
+  per-sector losses, so memory drops from O(n_simulations × n_assets) to
+  O(n_simulations × n_sectors). With `store_interim=true` only **defaulted**
+  obligor-trials are written (defaults are rare relative to the full grid),
+  supporting much larger books and run counts.
+
+### Breaking changes
+
+- **Interim Parquet schema is defaults-only with new debug columns.** Every row
+  is now a default event; the `defaulted` flag is gone. Added `default_period`
+  and `idiosyncratic_factor`; `systematic_factor_global`/`_sector` collapse to a
+  single `systematic_factor`. Portfolio totals that the rows no longer carry
+  (trial/asset counts, per-sector default rates) are written to the Parquet
+  file-level key-value metadata, and `ParquetResultsAnalyzer` reads them:
+  `count_simulations`/`count_assets` are exact, `get_trial_losses` reindexes to
+  every trial (zero-default trials contribute zero), and `analyze_by_sector`
+  recovers `default_rate` from the metadata. `get_systematic_factors` now returns
+  the per-default systematic and idiosyncratic factors.
+
+### Fixed
+
+- **NumPy fallback LGD is now correct without scipy.** When neither the Rust
+  backend nor scipy was available, the fallback returned a uniform (mean ≈ 0.5)
+  for realized LGD, ignoring `lgd_mean` and overstating loss behind only a
+  `UserWarning`. It now maps the LGD driver through a dependency-free, tabulated
+  Beta inverse-CDF (`simflux.utils.special.beta_ppf`) that matches
+  `scipy.stats.beta.ppf` to ~1e-4 (≤1e-5 for typical LGD Beta parameters). New
+  `tests/test_special.py`.
+
 ## [0.3.0] — 2026-06-03
 
 ### Fixed

@@ -717,12 +717,19 @@ class TwoFactorPortfolio(BaseSimulator):
             beta_ppf = scipy_stats.beta.ppf
             erf_func = scipy_erf
         except ImportError:
+            # No scipy: use dependency-free fallbacks. The Beta inverse-CDF is an
+            # accurate tabulated inversion (utils/special), so LGD is correct, not
+            # approximate; only the normal-quantile uses an approximation.
             warnings.warn(
-                "scipy not available, using approximate calculations", UserWarning
+                "scipy not available; using built-in special-function fallbacks "
+                "(accurate Beta inverse-CDF, approximate normal quantile). Install "
+                "scipy for the reference implementation.",
+                UserWarning,
             )
+            from ..utils.special import beta_ppf as _fallback_beta_ppf
 
             norm_ppf = approx_norm_ppf
-            beta_ppf = None
+            beta_ppf = _fallback_beta_ppf
             erf_func = np.vectorize(erf)
 
         rng = np.random.default_rng(self.config.seed)
@@ -761,15 +768,14 @@ class TwoFactorPortfolio(BaseSimulator):
 
         def _lgd_from_normal(lgd_normal: np.ndarray) -> np.ndarray:
             """Map a standard-normal LGD driver through the Gaussian copula to a
-            Beta-distributed realized LGD (uniform-clipped when scipy absent)."""
+            Beta-distributed realized LGD. ``beta_ppf`` is scipy's when available,
+            else the dependency-free tabulated inverse (utils/special)."""
             lgd_uniform = np.clip(
                 0.5 * (1 + erf_func(lgd_normal / np.sqrt(2))), 1e-12, 1 - 1e-12
             )
-            if beta_ppf is not None:
-                return beta_ppf(
-                    lgd_uniform, lgd_alpha[np.newaxis, :], lgd_beta_param[np.newaxis, :]
-                )
-            return np.clip(lgd_uniform, 1e-3, 1 - 1e-3)
+            return beta_ppf(
+                lgd_uniform, lgd_alpha[np.newaxis, :], lgd_beta_param[np.newaxis, :]
+            )
 
         losses = np.zeros((n_simulations, n_assets))
 

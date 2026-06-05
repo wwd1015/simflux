@@ -269,29 +269,37 @@ impl PortfolioConfig {
 // Result types
 // ---------------------------------------------------------------------------
 
+/// One row of the interim store: a single defaulted obligor in a single trial.
+/// Only defaults are materialized (defaults are rare relative to the full
+/// asset x trial grid), and only when `store_interim` is requested, so the
+/// per-trial memory is O(defaults) instead of O(n_assets). Carries the
+/// systematic and idiosyncratic factors at the moment of default for debugging.
 #[derive(Debug, Clone)]
-pub struct AssetSimulationResult {
+pub struct DefaultEvent {
     pub asset_id: u32,
     pub sector_id: u32,
-    pub defaulted: bool,
-    pub time_to_default: Option<f64>,
+    pub default_period: u32,
+    pub time_to_default: f64,
     pub loss_amount: f64,
     pub recovery_rate: f64,
     pub asset_value: f64,
-    pub systematic_factor_global: f64,
-    pub systematic_factor_sector: f64,
+    pub systematic_factor: f64,
+    pub idiosyncratic_factor: f64,
     pub pd: f64,
     pub lgd_mean: f64,
     pub exposure: f64,
 }
 
+/// Per-trial summary. `sector_losses` (length n_sectors) is accumulated inside
+/// the trial so the aggregate statistics never need the per-asset detail.
+/// `default_events` is empty unless interim storage was requested.
 #[derive(Debug, Clone)]
 pub struct TrialResult {
     pub trial_id: usize,
     pub total_loss: f64,
     pub total_defaults: u32,
-    pub systematic_factors: SystematicFactors,
-    pub asset_results: Vec<AssetSimulationResult>,
+    pub sector_losses: Vec<f64>,
+    pub default_events: Vec<DefaultEvent>,
 }
 
 pub struct SimulationResults {
@@ -438,7 +446,7 @@ pub fn simulate_portfolio_losses(
 
     let correlation_structure = TwoFactorCorrelationStructure::new(
         config.intra_sector_correlations.clone(),
-        sector_sizes,
+        sector_sizes.clone(),
         Some(config.sector_correlation_matrix.clone()),
     )
     .map_err(|e| PortfolioError::ConfigError(e.to_string()))?;
@@ -474,6 +482,7 @@ pub fn simulate_portfolio_losses(
     }
 
     // Run simulations in parallel
+    let n_sectors = config.sector_names.len();
     let trial_results: Vec<TrialResult> = (0..n_simulations)
         .into_par_iter()
         .map(|trial_id| {
@@ -488,6 +497,8 @@ pub fn simulate_portfolio_losses(
                 period_length,
                 copula,
                 seed,
+                store_interim,
+                n_sectors,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -498,16 +509,10 @@ pub fn simulate_portfolio_losses(
 
     let mut sector_statistics = HashMap::new();
     for (sector_id, sector_name) in config.sector_names.iter().enumerate() {
+        // Per-sector loss per trial is precomputed on each TrialResult.
         let sector_losses: Vec<f64> = trial_results
             .iter()
-            .map(|trial| {
-                trial
-                    .asset_results
-                    .iter()
-                    .filter(|a| a.sector_id == sector_id as u32)
-                    .map(|a| a.loss_amount)
-                    .sum()
-            })
+            .map(|trial| trial.sector_losses.get(sector_id).copied().unwrap_or(0.0))
             .collect();
         if !sector_losses.is_empty() {
             sector_statistics.insert(
@@ -519,7 +524,21 @@ pub fn simulate_portfolio_losses(
 
     if store_interim {
         if let Some(ref path) = output_path {
-            store_interim_results(&trial_results, path, &config.sector_names, batch_size)?;
+            // Per-sector asset counts let the analyzer recover default rates from
+            // the defaults-only store (non-defaulted asset-trials are not written).
+            let meta = InterimMetadata {
+                n_trials: n_simulations,
+                n_assets: assets.len(),
+                sector_names: config.sector_names.clone(),
+                sector_asset_counts: sector_sizes.clone(),
+            };
+            store_interim_results(
+                &trial_results,
+                path,
+                &config.sector_names,
+                batch_size,
+                &meta,
+            )?;
         }
     }
 
@@ -545,6 +564,8 @@ fn simulate_single_trial(
     period_length: f64,
     copula: bool,
     seed: Option<u64>,
+    store_interim: bool,
+    n_sectors: usize,
 ) -> Result<TrialResult, PortfolioError> {
     let mut rng = create_rng(seed, trial_id as u64);
     let n_assets = assets.len();
@@ -552,11 +573,12 @@ fn simulate_single_trial(
     // Per-asset mutable state
     let mut defaulted = vec![false; n_assets];
     let mut default_time: Vec<Option<f64>> = vec![None; n_assets];
+    let mut default_period: Vec<u32> = vec![0; n_assets];
     let mut loss_amounts = vec![0.0_f64; n_assets];
     let mut recovery_rates = vec![0.0_f64; n_assets];
     let mut asset_values = vec![0.0_f64; n_assets];
-    let mut factor_global = vec![0.0_f64; n_assets];
     let mut factor_sector = vec![0.0_f64; n_assets];
+    let mut factor_idio = vec![0.0_f64; n_assets];
 
     if copula {
         // One-factor Gaussian copula of default times: a single frozen latent
@@ -573,8 +595,8 @@ fn simulate_single_trial(
 
             let value = sector_loading * sector_factor + idio_loading * idio;
             asset_values[idx] = value;
-            factor_global[idx] = sector_factor;
             factor_sector[idx] = sector_factor;
+            factor_idio[idx] = idio;
 
             let threshold_final =
                 calculate_default_threshold(cumulative_pd(asset, n_periods - 1, n_periods));
@@ -588,6 +610,7 @@ fn simulate_single_trial(
                         break;
                     }
                 }
+                default_period[idx] = dperiod as u32;
                 default_time[idx] = Some((dperiod as f64 + 1.0) * period_length);
 
                 let lgd_corr = config.systematic_lgd_correlations[sector_index];
@@ -621,13 +644,14 @@ fn simulate_single_trial(
 
                 let value = sector_loading * sector_factor + idio_loading * idio;
                 asset_values[idx] = value;
-                factor_global[idx] = sector_factor;
                 factor_sector[idx] = sector_factor;
+                factor_idio[idx] = idio;
 
                 let threshold = barriers[idx][period];
 
                 if value <= threshold {
                     defaulted[idx] = true;
+                    default_period[idx] = period as u32;
                     default_time[idx] = Some((period as f64 + 1.0) * period_length);
 
                     let lgd_corr = config.systematic_lgd_correlations[sector_index];
@@ -643,41 +667,47 @@ fn simulate_single_trial(
         }
     }
 
-    // Build results
+    // Reduce to a per-trial summary. Per-sector losses are accumulated here so
+    // the aggregate statistics never need per-asset detail; default events are
+    // materialized only when interim storage was requested.
     let mut total_loss = 0.0;
     let mut total_defaults = 0u32;
-    let mut asset_results = Vec::with_capacity(n_assets);
+    let mut sector_losses = vec![0.0_f64; n_sectors];
+    let mut default_events: Vec<DefaultEvent> = Vec::new();
 
     for (idx, asset) in assets.iter().enumerate() {
         total_loss += loss_amounts[idx];
+        let sidx = asset.sector_id as usize;
+        if sidx < n_sectors {
+            sector_losses[sidx] += loss_amounts[idx];
+        }
         if defaulted[idx] {
             total_defaults += 1;
+            if store_interim {
+                default_events.push(DefaultEvent {
+                    asset_id: asset.asset_id,
+                    sector_id: asset.sector_id,
+                    default_period: default_period[idx],
+                    time_to_default: default_time[idx].unwrap_or(0.0),
+                    loss_amount: loss_amounts[idx],
+                    recovery_rate: recovery_rates[idx],
+                    asset_value: asset_values[idx],
+                    systematic_factor: factor_sector[idx],
+                    idiosyncratic_factor: factor_idio[idx],
+                    pd: asset.pd,
+                    lgd_mean: asset.lgd_mean,
+                    exposure: asset.exposure,
+                });
+            }
         }
-        asset_results.push(AssetSimulationResult {
-            asset_id: asset.asset_id,
-            sector_id: asset.sector_id,
-            defaulted: defaulted[idx],
-            time_to_default: default_time[idx],
-            loss_amount: loss_amounts[idx],
-            recovery_rate: recovery_rates[idx],
-            asset_value: asset_values[idx],
-            systematic_factor_global: factor_global[idx],
-            systematic_factor_sector: factor_sector[idx],
-            pd: asset.pd,
-            lgd_mean: asset.lgd_mean,
-            exposure: asset.exposure,
-        });
     }
-
-    // Use the first period's factors as the "representative" for the trial
-    let representative_factors = all_factors[0][trial_id].clone();
 
     Ok(TrialResult {
         trial_id,
         total_loss,
         total_defaults,
-        systematic_factors: representative_factors,
-        asset_results,
+        sector_losses,
+        default_events,
     })
 }
 
@@ -736,11 +766,23 @@ fn validate_portfolio_inputs(
     Ok(())
 }
 
+/// Portfolio-shape metadata written into the interim Parquet file so the
+/// analyzer can recover totals (default rates, trial/asset counts) that the
+/// defaults-only rows no longer carry directly.
+#[derive(Debug, Clone)]
+pub struct InterimMetadata {
+    pub n_trials: usize,
+    pub n_assets: usize,
+    pub sector_names: Vec<String>,
+    pub sector_asset_counts: Vec<usize>,
+}
+
 fn store_interim_results(
     trial_results: &[TrialResult],
     output_path: &str,
     sector_names: &[String],
     batch_size: Option<usize>,
+    meta: &InterimMetadata,
 ) -> Result<(), PortfolioError> {
     if output_path.is_empty() {
         return Err(PortfolioError::StorageError(
@@ -752,6 +794,7 @@ fn store_interim_results(
         output_path,
         sector_names,
         batch_size,
+        meta,
     )
     .map_err(|e| PortfolioError::StorageError(e.to_string()))
 }
