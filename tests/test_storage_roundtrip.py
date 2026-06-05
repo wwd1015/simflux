@@ -24,12 +24,14 @@ def default_heavy_portfolio():
     """High-PD portfolio so the defaults-only store has plenty of rows for the
     filter/round-trip tests (the sample portfolio's PD is ~2-5%, too sparse)."""
     assets = [
-        sf.AssetData(i, i % 2, 0.30, 0.5, 0.1, 1_000_000.0,
-                     "Tech" if i % 2 == 0 else "Finance")
+        sf.AssetData(
+            i, i % 2, 0.30, 0.5, 0.1, 1_000_000.0, "Tech" if i % 2 == 0 else "Finance"
+        )
         for i in range(10)
     ]
     return sf.TwoFactorPortfolio(
-        assets=assets, intra_sector_correlations=0.3,
+        assets=assets,
+        intra_sector_correlations=0.3,
         sector_correlation_matrix=[[1.0, 0.2], [0.2, 1.0]],
     )
 
@@ -43,9 +45,7 @@ class TestStorageRoundtrip:
             path = os.path.join(td, "results.parquet")
             config = sf.StorageConfig(store_interim=True, output_path=path)
 
-            results = sample_portfolio.simulate(
-                n_simulations=50, storage_config=config
-            )
+            results = sample_portfolio.simulate(n_simulations=50, storage_config=config)
 
             assert os.path.exists(path)
             assert os.path.getsize(path) > 0
@@ -73,8 +73,15 @@ class TestStorageRoundtrip:
 
             analyzer = sf.ParquetResultsAnalyzer(path)
             schema = analyzer.get_schema()
-            for col in ["trial_id", "asset_id", "sector", "default_period",
-                        "loss_amount", "systematic_factor", "idiosyncratic_factor"]:
+            for col in [
+                "trial_id",
+                "asset_id",
+                "sector",
+                "default_period",
+                "loss_amount",
+                "systematic_factor",
+                "idiosyncratic_factor",
+            ]:
                 assert col in schema
             # The sparse store no longer carries a 'defaulted' flag (all rows are
             # defaults).
@@ -216,7 +223,9 @@ class TestSparseInterimStore:
             default_heavy_portfolio.simulate(n_simulations=55, storage_config=config)
 
             analyzer = sf.ParquetResultsAnalyzer(path)
-            assert analyzer.count_simulations() == 55  # exact even if some trials had 0 defaults
+            assert (
+                analyzer.count_simulations() == 55
+            )  # exact even if some trials had 0 defaults
             assert analyzer.count_assets() == 10
             assert len(analyzer.get_trial_losses()) == 55  # reindexed to all trials
 
@@ -247,12 +256,44 @@ class TestSparseInterimStore:
             assert all(0.15 < r < 0.45 for r in rates)
 
     @pytest.mark.skipif(not Backend.is_available(), reason="Rust backend required")
+    def test_zero_default_sector_still_appears(self):
+        # A sector with negligible PD has no rows in the defaults-only store, but
+        # must still appear in analyze_by_sector (from metadata) with rate/total 0
+        # — dropping it would be a silently-missing risk number.
+        assets = [sf.AssetData(i, 0, 0.5, 0.5, 0.1, 1e6, "Loud") for i in range(5)] + [
+            sf.AssetData(5 + i, 1, 1e-9, 0.5, 0.1, 1e6, "Quiet") for i in range(5)
+        ]
+        port = sf.TwoFactorPortfolio(
+            assets=assets,
+            intra_sector_correlations=0.2,
+            sector_correlation_matrix=[[1.0, 0.1], [0.1, 1.0]],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "results.parquet")
+            config = sf.StorageConfig(store_interim=True, output_path=path)
+            port.simulate(n_simulations=100, storage_config=config)
+
+            analyzer = sf.ParquetResultsAnalyzer(path)
+            rows = {
+                r["sector"]: r
+                for r in analyzer.analyze_by_sector(
+                    metrics=["default_rate", "total_loss"]
+                ).to_dicts()
+            }
+            assert set(rows) == {"Loud", "Quiet"}  # zero-default sector not dropped
+            assert rows["Quiet"]["total_loss"] == 0.0
+            assert rows["Quiet"]["default_rate"] == pytest.approx(0.0, abs=1e-6)
+
+    @pytest.mark.skipif(not Backend.is_available(), reason="Rust backend required")
     def test_zero_default_file_is_readable(self):
         # Negligible PD: almost surely zero defaults, but the file must still be a
         # valid, metadata-bearing Parquet the analyzer can read and reindex.
         assets = [sf.AssetData(i, 0, 0.0001, 0.5, 0.1, 1e6, "S") for i in range(4)]
-        port = sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=0.2,
-                                     sector_correlation_matrix=[[1.0]])
+        port = sf.TwoFactorPortfolio(
+            assets=assets,
+            intra_sector_correlations=0.2,
+            sector_correlation_matrix=[[1.0]],
+        )
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "results.parquet")
             config = sf.StorageConfig(store_interim=True, output_path=path)

@@ -1,6 +1,7 @@
 """Storage utilities for simulation results using Parquet format."""
 
 import json
+import warnings
 import polars as pl
 import pandas as pd
 import numpy as np
@@ -45,6 +46,11 @@ class Columns:
     (non-defaulted asset-trials are not written). Portfolio totals the rows no
     longer carry — trial/asset counts, default rates — are read from the
     file-level key-value metadata (see :class:`MetadataKeys`).
+
+    Numeric columns (``loss_amount``, the factors, etc.) are stored as float32
+    for compactness, so statistics recomputed from the store differ from the
+    f64 ``portfolio_statistics`` returned by ``simulate()`` at ~1e-6 relative.
+    The interim store is for debug/inspection, not the authoritative result.
     """
 
     TRIAL_ID = "trial_id"
@@ -126,7 +132,13 @@ class ParquetResultsAnalyzer:
                     return {}
                 src = str(files[0])
             raw = pq.read_metadata(src).metadata or {}
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully, but visibly
+            warnings.warn(
+                f"Could not read Parquet file metadata ({exc!r}); analyzer totals "
+                "(trial/asset counts, default rates) fall back to the stored rows, "
+                "which undercount zero-default trials and sectors.",
+                RuntimeWarning,
+            )
             return {}
 
         def _get(key: str) -> Optional[str]:
@@ -302,11 +314,23 @@ class ParquetResultsAnalyzer:
             .collect()
         )
 
+        n_trials = self.metadata.get("n_trials")
+        sector_counts = self.metadata.get("sector_asset_counts") or {}
+
+        # Include every sector from metadata, not only those with defaults: a
+        # sector with zero defaults still has a real default_rate / total of 0,
+        # and dropping it from a risk table is itself a (missing) wrong number.
+        if sector_counts:
+            full = pl.DataFrame({Columns.SECTOR: list(sector_counts.keys())})
+            agg = full.join(agg, on=Columns.SECTOR, how="left").with_columns(
+                pl.col("total_loss").fill_null(0.0),
+                pl.col("avg_loss").fill_null(0.0),
+                pl.col("total_defaults").fill_null(0).cast(pl.Int64),
+            )
+
         if "default_rate" in metrics:
             # rate = defaults / (n_trials x assets in sector), recovered from
             # metadata since non-defaulted asset-trials are not stored.
-            n_trials = self.metadata.get("n_trials")
-            sector_counts = self.metadata.get("sector_asset_counts") or {}
             if n_trials and sector_counts:
                 rates = [
                     (
