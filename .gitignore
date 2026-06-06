@@ -98,3 +98,6 @@ portfolio_simulation_results*
 # Compiled binaries
 *.dylib
 *.dll
+# Benchmark run artifacts (timestamped CSV/report written to CWD)
+simflux_benchmark_*.csv
+simflux_benchmark_report_*.txt
