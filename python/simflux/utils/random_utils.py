@@ -123,12 +123,19 @@ def ensure_valid_correlation_matrix(
     """
     adjusted = matrix.copy()
 
+    # A comfortable positive-definite margin, well above the strict validator's
+    # tolerance (CORRELATION_TOLERANCE). Already-PD inputs sit far above this and
+    # pass straight through with their exact entries preserved; near-singular
+    # inputs are lifted clear of the strict-PD boundary rather than left right at
+    # the tolerance (where the Cholesky/eigenvalue check rejects them).
+    margin = 1e-6
+
     for _ in range(max_iterations):
         eigenvals, eigenvecs = np.linalg.eigh(adjusted)
-        if np.all(eigenvals > CORRELATION_TOLERANCE):
-            break
+        if np.all(eigenvals > margin):
+            return adjusted
 
-        eigenvals = np.maximum(eigenvals, CORRELATION_TOLERANCE)
+        eigenvals = np.maximum(eigenvals, margin)
 
         adjusted = eigenvecs @ np.diag(eigenvals) @ eigenvecs.T
 
@@ -136,6 +143,12 @@ def ensure_valid_correlation_matrix(
         adjusted = adjusted / np.outer(diag_sqrt, diag_sqrt)
 
         np.fill_diagonal(adjusted, 1.0)
+
+    # Renormalization can erode the eigenvalue floor back toward zero; a final
+    # ridge toward the identity guarantees the margin while keeping unit diagonal.
+    n = adjusted.shape[0]
+    adjusted = (adjusted + margin * np.eye(n)) / (1.0 + margin)
+    np.fill_diagonal(adjusted, 1.0)
 
     return adjusted
 

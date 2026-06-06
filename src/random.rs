@@ -30,31 +30,3 @@ pub fn generate_independent_normals(n: usize, seed: Option<u64>) -> Vec<f64> {
         })
         .collect()
 }
-
-pub fn generate_correlated_normals_batch(
-    n_samples: usize,
-    n_factors: usize,
-    cholesky: &[Vec<f64>],
-    seed: Option<u64>,
-) -> Vec<Vec<f64>> {
-    (0..n_samples)
-        .into_par_iter()
-        .map(|sample_idx| {
-            let mut rng = create_rng(seed, sample_idx as u64);
-
-            // Generate independent standard normals
-            let independent: Vec<f64> = (0..n_factors)
-                .map(|_| sample_standard_normal(&mut rng))
-                .collect();
-
-            // Apply Cholesky transformation
-            let mut correlated = vec![0.0; n_factors];
-            for i in 0..n_factors {
-                for j in 0..=i {
-                    correlated[i] += cholesky[i][j] * independent[j];
-                }
-            }
-            correlated
-        })
-        .collect()
-}

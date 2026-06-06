@@ -9,6 +9,7 @@
 #![allow(clippy::unwrap_or_default)]
 #![allow(deprecated)]
 
+use numpy::{IntoPyArray, PyArray2, PyArray3};
 use pyo3::prelude::*;
 
 pub mod correlation;
@@ -24,9 +25,56 @@ use gbm::{
 };
 use portfolio::{simulate_portfolio_losses, AssetData, PortfolioConfig};
 
+/// Flatten a `Vec<Vec<f64>>` (rows x cols) into a contiguous NumPy 2-D array.
+/// Returning a NumPy array instead of a Python list-of-lists avoids boxing every
+/// element into a `PyFloat`, which dominated the GBM marshalling cost.
+fn vec2_to_pyarray(py: Python<'_>, vv: Vec<Vec<f64>>) -> PyResult<Bound<'_, PyArray2<f64>>> {
+    let nrows = vv.len();
+    let ncols = vv.first().map_or(0, |r| r.len());
+    let mut flat = Vec::with_capacity(nrows * ncols);
+    for row in &vv {
+        if row.len() != ncols {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "ragged GBM path matrix",
+            ));
+        }
+        flat.extend_from_slice(row);
+    }
+    ndarray::Array2::from_shape_vec((nrows, ncols), flat)
+        .map(|arr| arr.into_pyarray_bound(py))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
+/// Flatten a `Vec<Vec<Vec<f64>>>` (d0 x d1 x d2) into a contiguous NumPy 3-D array.
+fn vec3_to_pyarray(py: Python<'_>, vvv: Vec<Vec<Vec<f64>>>) -> PyResult<Bound<'_, PyArray3<f64>>> {
+    let d0 = vvv.len();
+    let d1 = vvv.first().map_or(0, |a| a.len());
+    let d2 = vvv.first().and_then(|a| a.first()).map_or(0, |p| p.len());
+    let mut flat = Vec::with_capacity(d0 * d1 * d2);
+    for a in &vvv {
+        if a.len() != d1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "ragged GBM path tensor",
+            ));
+        }
+        for p in a {
+            if p.len() != d2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "ragged GBM path tensor",
+                ));
+            }
+            flat.extend_from_slice(p);
+        }
+    }
+    ndarray::Array3::from_shape_vec((d0, d1, d2), flat)
+        .map(|arr| arr.into_pyarray_bound(py))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
 #[pyfunction]
 #[pyo3(name = "simulate_gbm", signature = (mu, sigma, s0, n_paths, n_steps, dt, seed=None))]
-fn py_simulate_gbm(
+fn py_simulate_gbm<'py>(
+    py: Python<'py>,
     mu: f64,
     sigma: f64,
     s0: f64,
@@ -34,15 +82,17 @@ fn py_simulate_gbm(
     n_steps: usize,
     dt: f64,
     seed: Option<u64>,
-) -> PyResult<Vec<Vec<f64>>> {
-    Ok(simulate_gbm_single(
-        mu, sigma, s0, n_paths, n_steps, dt, seed,
-    ))
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    vec2_to_pyarray(
+        py,
+        simulate_gbm_single(mu, sigma, s0, n_paths, n_steps, dt, seed),
+    )
 }
 
 #[pyfunction]
 #[pyo3(name = "simulate_gbm_multi", signature = (mu, sigma, s0, correlation_matrix, n_paths, n_steps, dt, seed=None))]
-fn py_simulate_gbm_multi(
+fn py_simulate_gbm_multi<'py>(
+    py: Python<'py>,
     mu: Vec<f64>,
     sigma: Vec<f64>,
     s0: Vec<f64>,
@@ -51,8 +101,8 @@ fn py_simulate_gbm_multi(
     n_steps: usize,
     dt: f64,
     seed: Option<u64>,
-) -> PyResult<Vec<Vec<Vec<f64>>>> {
-    match simulate_gbm_correlated(
+) -> PyResult<Bound<'py, PyArray3<f64>>> {
+    let paths = simulate_gbm_correlated(
         mu,
         sigma,
         s0,
@@ -61,17 +111,17 @@ fn py_simulate_gbm_multi(
         n_steps,
         dt,
         seed,
-    ) {
-        Ok(paths) => Ok(paths),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            e.to_string(),
-        )),
-    }
+    )
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    // `simulate_gbm_correlated` already produced a contiguous Array3, so this is a
+    // move into NumPy with no extra copy.
+    Ok(paths.into_pyarray_bound(py))
 }
 
 #[pyfunction]
 #[pyo3(name = "simulate_gbm_tv", signature = (mu_times, mu_values, sigma_times, sigma_values, s0, n_paths, n_steps, dt, t_start, seed=None))]
-fn py_simulate_gbm_time_varying(
+fn py_simulate_gbm_time_varying<'py>(
+    py: Python<'py>,
     mu_times: Vec<f64>,
     mu_values: Vec<f64>,
     sigma_times: Vec<f64>,
@@ -82,24 +132,28 @@ fn py_simulate_gbm_time_varying(
     dt: f64,
     t_start: f64,
     seed: Option<u64>,
-) -> PyResult<Vec<Vec<f64>>> {
-    Ok(simulate_gbm_time_varying_single(
-        &mu_times,
-        &mu_values,
-        &sigma_times,
-        &sigma_values,
-        s0,
-        n_paths,
-        n_steps,
-        dt,
-        t_start,
-        seed,
-    ))
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    vec2_to_pyarray(
+        py,
+        simulate_gbm_time_varying_single(
+            &mu_times,
+            &mu_values,
+            &sigma_times,
+            &sigma_values,
+            s0,
+            n_paths,
+            n_steps,
+            dt,
+            t_start,
+            seed,
+        ),
+    )
 }
 
 #[pyfunction]
 #[pyo3(name = "simulate_gbm_tv_multi", signature = (mu_times, mu_values, sigma_times, sigma_values, s0, correlation_matrix, n_paths, n_steps, dt, t_start, seed=None))]
-fn py_simulate_gbm_time_varying_correlated(
+fn py_simulate_gbm_time_varying_correlated<'py>(
+    py: Python<'py>,
     mu_times: Vec<Vec<f64>>,
     mu_values: Vec<Vec<f64>>,
     sigma_times: Vec<Vec<f64>>,
@@ -111,8 +165,8 @@ fn py_simulate_gbm_time_varying_correlated(
     dt: f64,
     t_start: f64,
     seed: Option<u64>,
-) -> PyResult<Vec<Vec<Vec<f64>>>> {
-    match simulate_gbm_time_varying_correlated(
+) -> PyResult<Bound<'py, PyArray3<f64>>> {
+    let paths = simulate_gbm_time_varying_correlated(
         mu_times,
         mu_values,
         sigma_times,
@@ -124,12 +178,9 @@ fn py_simulate_gbm_time_varying_correlated(
         dt,
         t_start,
         seed,
-    ) {
-        Ok(paths) => Ok(paths),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            e.to_string(),
-        )),
-    }
+    )
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    vec3_to_pyarray(py, paths)
 }
 
 #[pyfunction]

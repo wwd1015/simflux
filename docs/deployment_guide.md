@@ -10,7 +10,7 @@ This guide shows how to build and deploy SimFlux binary wheels to your internal 
 ✅ **Automatic fallback** to NumPy if binary wheels unavailable  
 ✅ **Cross-platform support** (Linux, macOS, Windows)  
 ✅ **Multiple Python versions** (3.8-3.12)  
-✅ **7x average performance improvement** with Rust backend  
+✅ **~2.6–45x faster** with the Rust backend (10–45x for portfolios)  
 
 ## Build Process
 
@@ -370,7 +370,7 @@ pip show -f simflux
 This deployment strategy provides:
 
 ✅ **Seamless user experience** - no compilation required  
-✅ **High performance** - 7x speedup with Rust backend  
+✅ **High performance** - ~2.6–45x speedup with the Rust backend  
 ✅ **Compatibility** - automatic NumPy fallback  
 ✅ **Enterprise ready** - internal artifactory deployment  
 ✅ **Cross-platform** - Windows, macOS, Linux support  

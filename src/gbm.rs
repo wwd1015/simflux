@@ -1,5 +1,6 @@
-use crate::correlation::{cholesky_decomposition, generate_correlated_normals, CorrelationError};
+use crate::correlation::{cholesky_decomposition, CorrelationError};
 use crate::random::{create_rng, sample_standard_normal};
+use ndarray::Array3;
 use rayon::prelude::*;
 
 /// Linear interpolation with clamping outside the provided time range.
@@ -69,7 +70,7 @@ pub fn simulate_gbm_correlated(
     n_steps: usize,
     dt: f64,
     seed: Option<u64>,
-) -> Result<Vec<Vec<Vec<f64>>>, CorrelationError> {
+) -> Result<Array3<f64>, CorrelationError> {
     let n_assets = mu.len();
 
     if sigma.len() != n_assets {
@@ -94,49 +95,51 @@ pub fn simulate_gbm_correlated(
         )));
     }
 
-    // Precompute constants
+    // Precompute constants and the Cholesky factor for inline correlation.
     let drift: Vec<f64> = mu
         .iter()
         .zip(sigma.iter())
         .map(|(&m, &s)| (m - 0.5 * s * s) * dt)
         .collect();
-
     let vol_sqrt_dt: Vec<f64> = sigma.iter().map(|&s| s * dt.sqrt()).collect();
+    let cholesky = cholesky_decomposition(correlation_matrix)?;
 
-    // Generate all correlated random numbers at once for efficiency
-    let total_randoms = n_paths * n_steps;
-    let correlated_randoms = generate_correlated_normals(total_randoms, correlation_matrix, seed)?;
+    // Write paths directly into one flat, row-major (n_paths, n_assets, n_steps+1)
+    // buffer, generating correlated normals inline per path. This holds a single
+    // copy of the result — no pre-generated randoms buffer, no `Vec<Vec<Vec>>`
+    // intermediate, and no flattening copy when handed to NumPy.
+    let stride = n_steps + 1;
+    let mut flat = vec![0.0_f64; n_paths * n_assets * stride];
+    flat.par_chunks_mut(n_assets * stride)
+        .enumerate()
+        .for_each(|(path_idx, chunk)| {
+            // One RNG per path (not per sample): deterministic and cheap.
+            let mut rng = create_rng(seed, path_idx as u64);
+            let mut current = s0.clone();
+            let mut independent = vec![0.0_f64; n_assets];
 
-    // Simulate paths
-    let paths = (0..n_paths)
-        .into_par_iter()
-        .map(|path_idx| {
-            let mut paths = vec![Vec::with_capacity(n_steps + 1); n_assets];
-            let mut current_values = s0.clone();
-
-            // Initialize paths with starting values
             for asset_idx in 0..n_assets {
-                paths[asset_idx].push(s0[asset_idx]);
+                chunk[asset_idx * stride] = s0[asset_idx];
             }
 
-            // Generate path steps
-            for step in 0..n_steps {
-                let random_idx = path_idx * n_steps + step;
-                let randoms = &correlated_randoms[random_idx];
-
+            for step in 1..stride {
+                for z in independent.iter_mut() {
+                    *z = sample_standard_normal(&mut rng);
+                }
                 for asset_idx in 0..n_assets {
-                    let dw = randoms[asset_idx];
-                    current_values[asset_idx] *=
-                        (drift[asset_idx] + vol_sqrt_dt[asset_idx] * dw).exp();
-                    paths[asset_idx].push(current_values[asset_idx]);
+                    // Correlated increment = (Cholesky row asset_idx) . independent.
+                    let mut dw = 0.0;
+                    for j in 0..=asset_idx {
+                        dw += cholesky[asset_idx][j] * independent[j];
+                    }
+                    current[asset_idx] *= (drift[asset_idx] + vol_sqrt_dt[asset_idx] * dw).exp();
+                    chunk[asset_idx * stride + step] = current[asset_idx];
                 }
             }
+        });
 
-            paths
-        })
-        .collect();
-
-    Ok(paths)
+    Array3::from_shape_vec((n_paths, n_assets, stride), flat)
+        .map_err(|e| CorrelationError::InvalidMatrix(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------

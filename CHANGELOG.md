@@ -6,6 +6,46 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-06-05
+
+### Performance
+
+- **The Rust backend is now ~2.6–45x faster than the NumPy fallback** (it had
+  been up to ~3x *slower* for GBM paths). Three fixes:
+  - GBM entry points return contiguous NumPy arrays instead of a Python
+    list-of-lists, eliminating per-element `PyFloat` boxing (GBM Large Rust path
+    0.61s → 0.079s).
+  - Correlated normals are generated with one RNG per path/chunk instead of one
+    per sample (which re-seeded a ChaCha RNG hundreds of thousands of times).
+  - Correlated GBM writes paths inline into a single contiguous `Array3` — no
+    pre-generated randoms buffer, no `Vec<Vec<Vec<f64>>>` tensor, no flatten
+    copy — so its peak memory drops from ~3x the NumPy fallback to parity.
+  - Net memory: single-asset GBM ~0.4x NumPy, correlated GBM ~parity, portfolios
+    10–100x leaner (the sparse interim store).
+
+### Fixed
+
+- **`generate_correlation_matrix` now returns a strictly positive-definite
+  matrix.** The repair floored eigenvalues exactly at the tolerance, leaving the
+  smallest one at the strict-PD boundary, so the function violated its own
+  "positive definite" docstring and raised `correlation_matrix must be positive
+  definite` when its output was fed to `CorrelatedGBM`. Already-PD inputs still
+  pass through with exact entries; near-singular inputs are lifted clear of the
+  boundary (unit diagonal preserved).
+
+### Changed
+
+- **Accurate memory benchmark.** `benchmarks/performance_comparison.py` measured
+  memory as an in-process RSS before/after delta — meaningless, since GC and
+  allocator caching produced negative and `inf` readings. Each workload now runs
+  in an isolated subprocess and reports the kernel peak RSS (`ru_maxrss`).
+  `docs/performance_benchmarks.md` (and the README/deployment perf claims) are
+  rewritten to the real measured numbers; the previous "3–14x speedup / 3–5x
+  memory" figures were not reproducible.
+- **Correlated-GBM RNG scheme changed** (one RNG per path). Exact seeded paths
+  therefore differ from 0.4.0; the distribution is unchanged and within-version
+  reproducibility is preserved.
+
 ## [0.4.0] — 2026-06-04
 
 ### Changed
