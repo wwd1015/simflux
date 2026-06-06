@@ -93,11 +93,13 @@ pub fn cholesky_decomposition(matrix: Vec<Vec<f64>>) -> Result<Vec<Vec<f64>>, Co
     }
 }
 
+/// Correlated standard normals as a flat, sample-major `Vec<f64>` of length
+/// `n_samples * n_factors` (factor `i` of sample `s` at `s * n_factors + i`).
 pub fn generate_correlated_normals(
     n_samples: usize,
     correlation_matrix: Vec<Vec<f64>>,
     seed: Option<u64>,
-) -> Result<Vec<Vec<f64>>, CorrelationError> {
+) -> Result<Vec<f64>, CorrelationError> {
     let cholesky = cholesky_decomposition(correlation_matrix)?;
     let n_factors = cholesky.len();
 

@@ -196,7 +196,9 @@ class SimulationEngine:
         surfacing as silently wrong numbers downstream.
         """
         _rust = Backend.get_rust()
-        paths = np.array(getattr(_rust, fn_name)(**kwargs))
+        # The Rust backend returns a contiguous NumPy array (not a list-of-lists),
+        # so asarray is zero-copy rather than re-parsing/boxing every element.
+        paths = np.asarray(getattr(_rust, fn_name)(**kwargs))
         if paths.shape != expected_shape:
             raise RuntimeError(
                 f"Rust backend '{fn_name}' returned shape {paths.shape}, "

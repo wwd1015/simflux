@@ -119,13 +119,13 @@ pub fn simulate_gbm_correlated(
                 paths[asset_idx].push(s0[asset_idx]);
             }
 
-            // Generate path steps
+            // Generate path steps. `correlated_randoms` is a flat sample-major
+            // buffer; sample (path, step) starts at `(path*n_steps + step)*n_assets`.
             for step in 0..n_steps {
-                let random_idx = path_idx * n_steps + step;
-                let randoms = &correlated_randoms[random_idx];
+                let base = (path_idx * n_steps + step) * n_assets;
 
                 for asset_idx in 0..n_assets {
-                    let dw = randoms[asset_idx];
+                    let dw = correlated_randoms[base + asset_idx];
                     current_values[asset_idx] *=
                         (drift[asset_idx] + vol_sqrt_dt[asset_idx] * dw).exp();
                     paths[asset_idx].push(current_values[asset_idx]);
