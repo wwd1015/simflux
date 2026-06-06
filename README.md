@@ -54,7 +54,8 @@ times are hardware-dependent):
 
 - **GBM**: ~2.6–3.8x faster, ~0.4x the memory.
 - **Correlated GBM**: ~3–5x faster, memory at parity.
-- **Portfolio**: ~10–45x faster, **10–100x less** memory (sparse interim storage).
+- **Portfolio**: ~10–45x faster, **~8–25x less** memory (Rust streams per-trial;
+  the fallback reduces in bounded chunks).
 
 *See [`docs/performance_benchmarks.md`](docs/performance_benchmarks.md) for the
 full tables and methodology, and run `python benchmarks/performance_comparison.py`

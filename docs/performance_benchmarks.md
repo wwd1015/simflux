@@ -8,8 +8,9 @@ backend exists for speed and memory.
 
 **Measured results** (see methodology below): the Rust backend is **~2.6–45x
 faster** than the NumPy fallback across every workload. Memory is **comparable to
-much lower**: portfolios use **10–100x less** memory in Rust (sparse interim
-storage), single-asset GBM about **half**, and correlated GBM is **at parity**.
+lower**: portfolios use **~8–25x less** memory in Rust (it streams per-trial,
+while the fallback batches), single-asset GBM about **half**, and correlated GBM
+is **at parity**.
 
 > These are indicative numbers from one machine (Apple Silicon, release build).
 > Absolute times are hardware-dependent — the **ratios** are what carry across
@@ -25,7 +26,15 @@ storage), single-asset GBM about **half**, and correlated GBM is **at parity**.
   allocations too (they live outside Python's allocator, so `tracemalloc` would
   miss them). The reported memory figure is **Rust ÷ NumPy** — values below 1.0
   mean Rust uses less.
-- The fallback path is exercised directly via the engine's `_numpy_*` methods.
+- The fallback path is exercised directly via the engine's `_numpy_*` methods
+  (and `_fallback_simulate_portfolio` for portfolios).
+- **Portfolio memory parity.** Both backends now reduce each trial to the same
+  summaries (total loss + per-sector loss) rather than the Rust backend reducing
+  while the NumPy fallback held a dense `n_simulations × n_assets` grid. The
+  fallback processes simulations in bounded chunks, so the comparison reflects
+  the backends, not a data-structure choice. These figures are the **scipy-free**
+  fallback; with scipy installed, the fallback's per-asset Beta lookup tables are
+  replaced by scipy's `ppf` and its memory drops further.
 
 ## Detailed Results
 
@@ -60,15 +69,23 @@ so there is no separate randoms buffer and no flattening copy. At trivial sizes
 
 | Problem size | Rust time | NumPy time | Speedup | Rust mem (×NumPy) |
 |---|---|---|---|---|
-| 50 assets × 1K simulations | 0.003s | 0.076s | **30x** | 0.11x |
-| 200 assets × 5K simulations | 0.025s | 0.457s | **18x** | 0.01x |
-| 500 assets × 2K simulations | 0.022s | 1.004s | **45x** | 0.01x |
-| 100 assets × 10K simulations | 0.031s | 0.327s | **11x** | 0.02x |
+| 50 assets × 1K simulations | 0.003s | 0.079s | **27x** | 0.13x |
+| 200 assets × 5K simulations | 0.026s | 0.499s | **19x** | 0.05x |
+| 500 assets × 2K simulations | 0.024s | 0.967s | **41x** | 0.04x |
+| 100 assets × 10K simulations | 0.032s | 0.330s | **10x** | 0.11x |
 
-The portfolio path is where Rust dominates: **10–45x faster** and **dramatically
-leaner**. It returns a small statistics dictionary (no large array crosses the
-boundary), the Monte Carlo loop parallelizes cleanly, and the NumPy fallback
-materializes `n_simulations × n_assets` intermediate arrays that Rust avoids.
+The portfolio path is where Rust dominates on speed: **10–41x faster**, because
+it returns a small statistics dictionary (no large array crosses the boundary)
+and the Monte Carlo loop parallelizes cleanly across cores.
+
+On memory, Rust uses **~8–25x less**. Both backends now reduce each trial on the
+fly to its total and per-sector loss, so neither holds a dense
+`n_simulations × n_assets` grid; the remaining gap is that Rust streams per-trial
+with negligible scratch while the vectorized fallback keeps a bounded
+per-chunk batch (and, on the scipy-free path, O(`n_assets`) Beta lookup tables —
+the 500-asset row above). The earlier "~100x leaner" figure was an artifact of
+the fallback materializing that dense grid; once it reduces per-chunk like Rust,
+the honest ratio is single-to-low-double digits.
 
 ## Why the differences exist
 
@@ -76,11 +93,13 @@ materializes `n_simulations × n_assets` intermediate arrays that Rust avoids.
 - True parallelism (no GIL) via Rayon work-stealing.
 - Returns contiguous NumPy arrays (zero per-element boxing) and small result
   dicts for portfolios.
-- Sparse, defaults-only interim storage keeps portfolio memory tiny.
+- Streams each trial to a per-trial summary, so portfolio memory stays O(trials ×
+  sectors); sparse, defaults-only interim storage keeps the on-disk path tiny too.
 
 **NumPy fallback** — `Python API → vectorized NumPy → result`:
-- Vectorized and correct, but allocates large intermediates for portfolios and
-  pays Python-object overhead at the boundary.
+- Vectorized and correct; reduces portfolios in bounded chunks to the same
+  per-trial summaries (no dense `trials × assets` grid), but still keeps a small
+  vectorization batch and pays Python-object overhead at the boundary.
 - Single-threaded outside NumPy's own C loops.
 
 ## When each backend matters

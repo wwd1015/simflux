@@ -6,6 +6,28 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-06-05
+
+### Changed
+
+- **NumPy portfolio fallback now reduces per-chunk instead of holding a dense
+  `n_simulations × n_assets` loss grid**, making the memory benchmark a fair
+  backend comparison. The Rust backend already streamed each trial to a per-trial
+  summary (total loss + per-sector loss, O(`n_simulations × n_sectors`) retained);
+  the fallback previously materialized ~8 simultaneous `n_simulations × n_assets`
+  arrays, so the "portfolios use ~100x less memory in Rust" figure was measuring a
+  data-structure choice in Python, not the backend. The fallback now walks
+  simulations in bounded chunks (`_FALLBACK_CHUNK_ELEMENTS`) and reduces each chunk
+  to the same two summaries, dropping its peak from a flat ~147 MB (any shape) to
+  memory that scales with `n_assets` (e.g. 200a×5K: 147 MB → 34 MB; 100a×10K:
+  147 MB → 26 MB). The honest portfolio memory ratio is now **~8–25x** less in
+  Rust (was reported as 10–100x). The scipy-free Beta inverse-CDF is also tabulated
+  **once per distinct obligor** up front rather than rebuilt on every chunk, so
+  chunking adds no measurable time. The per-simulation math is unchanged (only the
+  random-draw *order* changes), so the loss distribution and every cross-validated
+  statistic are identical; `docs/performance_benchmarks.md`, the README, and
+  `docs/architecture_comparison.md` are updated to the fair numbers.
+
 ## [0.4.1] — 2026-06-05
 
 ### Performance

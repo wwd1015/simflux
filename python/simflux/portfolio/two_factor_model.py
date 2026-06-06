@@ -15,6 +15,14 @@ from ..utils.random_utils import (
     safe_cholesky,
 )
 
+# Max f64 elements in one dense (chunk, n_assets) scratch array in the NumPy
+# fallback. The fallback reduces each chunk of simulations to per-trial summaries
+# (mirroring the Rust backend), so this caps peak scratch instead of letting it
+# scale with n_simulations. ~32K elements keeps the dozen-odd live intermediates
+# down to a few MB total with no measurable throughput loss (NumPy vectorization
+# saturates well below this batch size); larger caps only inflate peak memory.
+_FALLBACK_CHUNK_ELEMENTS = 32_768
+
 
 @dataclass
 class AssetData:
@@ -716,6 +724,7 @@ class TwoFactorPortfolio(BaseSimulator):
             norm_ppf = scipy_stats.norm.ppf
             beta_ppf = scipy_stats.beta.ppf
             erf_func = scipy_erf
+            have_scipy = True
         except ImportError:
             # No scipy: use dependency-free fallbacks. The Beta inverse-CDF is an
             # accurate tabulated inversion (utils/special), so LGD is correct, not
@@ -731,6 +740,7 @@ class TwoFactorPortfolio(BaseSimulator):
             norm_ppf = approx_norm_ppf
             beta_ppf = _fallback_beta_ppf
             erf_func = np.vectorize(erf)
+            have_scipy = False
 
         rng = np.random.default_rng(self.config.seed)
 
@@ -739,7 +749,13 @@ class TwoFactorPortfolio(BaseSimulator):
         if n_sectors == 0:
             raise ValueError("Portfolio must contain at least one sector")
 
-        self._check_memory(n_simulations * n_periods * (n_sectors + 2 * n_assets))
+        # Retained outputs are O(n_simulations * n_sectors) (per-trial total and
+        # per-sector loss); dense per-chunk scratch is bounded independently of
+        # n_simulations (see _FALLBACK_CHUNK_ELEMENTS), so the guard no longer
+        # scales with n_assets * n_simulations.
+        self._check_memory(
+            n_simulations * (n_sectors + 1) + 8 * _FALLBACK_CHUNK_ELEMENTS
+        )
 
         sector_cholesky = safe_cholesky(
             self.sector_correlation_matrix, name="sector_correlation_matrix"
@@ -766,19 +782,59 @@ class TwoFactorPortfolio(BaseSimulator):
             (asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1
         )
 
+        # Build the LGD inverse-CDF once, so the chunk loop below never recomputes
+        # it. With scipy, beta.ppf is cheap and stateless, so call it per chunk.
+        # Without scipy, tabulate I_x(alpha, beta) once per *distinct* obligor
+        # (alpha, beta) up front and invert by interpolation per chunk — otherwise
+        # the (expensive) tabulation would repeat on every chunk.
+        if have_scipy:
+
+            def _inv_beta(lgd_uniform: np.ndarray) -> np.ndarray:
+                return beta_ppf(
+                    lgd_uniform,
+                    lgd_alpha[np.newaxis, :],
+                    lgd_beta_param[np.newaxis, :],
+                )
+
+        else:
+            from ..utils.special import reg_incomplete_beta as _reg_incomplete_beta
+
+            _lgd_grid = np.linspace(0.0, 1.0, 8192)
+            _cdf_cache: Dict[tuple, np.ndarray] = {}
+            _col_cdf: List[np.ndarray] = []
+            for _a, _b in zip(lgd_alpha, lgd_beta_param):
+                _key = (float(_a), float(_b))
+                _cdf = _cdf_cache.get(_key)
+                if _cdf is None:
+                    _cdf = _reg_incomplete_beta(_a, _b, _lgd_grid)
+                    np.maximum.accumulate(_cdf, out=_cdf)  # monotone for np.interp
+                    _cdf_cache[_key] = _cdf
+                _col_cdf.append(_cdf)
+
+            def _inv_beta(lgd_uniform: np.ndarray) -> np.ndarray:
+                out = np.empty_like(lgd_uniform)
+                for j in range(lgd_uniform.shape[-1]):
+                    out[..., j] = np.interp(lgd_uniform[..., j], _col_cdf[j], _lgd_grid)
+                return out
+
         def _lgd_from_normal(lgd_normal: np.ndarray) -> np.ndarray:
             """Map a standard-normal LGD driver through the Gaussian copula to a
-            Beta-distributed realized LGD. ``beta_ppf`` is scipy's when available,
-            else the dependency-free tabulated inverse (utils/special)."""
+            Beta-distributed realized LGD, using the precomputed inverse CDF."""
             lgd_uniform = np.clip(
                 0.5 * (1 + erf_func(lgd_normal / np.sqrt(2))), 1e-12, 1 - 1e-12
             )
-            return beta_ppf(
-                lgd_uniform, lgd_alpha[np.newaxis, :], lgd_beta_param[np.newaxis, :]
-            )
+            return _inv_beta(lgd_uniform)
 
-        losses = np.zeros((n_simulations, n_assets))
-
+        # Memory-frugal reduction.  The Rust backend never materializes a dense
+        # (n_simulations, n_assets) loss grid: each trial is reduced on the fly to
+        # its total loss and per-sector loss (TrialResult), so its retained memory
+        # is O(n_simulations * n_sectors).  The fallback now matches that — it
+        # walks the simulations in chunks and reduces each chunk to the same two
+        # summaries, capping dense scratch at O(chunk * n_assets) instead of
+        # holding ~8 simultaneous (n_simulations, n_assets) arrays.  The
+        # per-simulation math is byte-for-byte the same as the full-grid version;
+        # only the random-draw order changes, so the loss *distribution* (and
+        # every cross-validated statistic) is unchanged.
         if default_timing == "copula":
             # One-factor Gaussian copula of default *times* (Li, 2000): a single
             # latent V per obligor for the whole horizon, thresholded against the
@@ -787,38 +843,45 @@ class TwoFactorPortfolio(BaseSimulator):
             cum_final = self._get_cumulative_pds(n_periods - 1, n_periods)
             final_threshold = norm_ppf(cum_final)
 
+        # Asset column indices per sector, computed once for the chunk reduction.
+        sector_asset_cols = [
+            np.flatnonzero(asset_sector_ids == s) for s in range(n_sectors)
+        ]
+        chunk = max(1, min(n_simulations, _FALLBACK_CHUNK_ELEMENTS // max(1, n_assets)))
+
+        def _copula_chunk_losses(n_chunk: int) -> np.ndarray:
             sector_factor_all = (
-                rng.normal(size=(n_simulations, n_sectors)) @ sector_cholesky.T
+                rng.normal(size=(n_chunk, n_sectors)) @ sector_cholesky.T
             )
             asset_sector_factors = sector_factor_all[:, asset_sector_ids]
-            idiosyncratic = rng.normal(size=(n_simulations, n_assets))
+            idiosyncratic = rng.normal(size=(n_chunk, n_assets))
             latent = (
                 sector_loadings[np.newaxis, :] * asset_sector_factors
                 + idio_loadings[np.newaxis, :] * idiosyncratic
             )
             defaulted = latent <= final_threshold[np.newaxis, :]
+            if not np.any(defaulted):
+                return np.zeros((n_chunk, n_assets))
+            lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
+            lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(
+                size=(n_chunk, n_assets)
+            )
+            lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
+            return np.where(
+                defaulted, lgd_realized * asset_exposures[np.newaxis, :], 0.0
+            )
 
-            if np.any(defaulted):
-                lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
-                lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(
-                    size=(n_simulations, n_assets)
-                )
-                lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
-                losses = np.where(
-                    defaulted, lgd_realized * asset_exposures[np.newaxis, :], 0.0
-                )
-        else:
+        def _frailty_chunk_losses(n_chunk: int) -> np.ndarray:
             # Dynamic frailty: a persistent (AR(1)) systematic factor with fresh
             # idiosyncratic shocks each period; first-passage against the
             # pre-calibrated barriers (which preserve the marginal PD for any phi).
             assert barriers is not None  # always computed for default_timing="frailty"
             sqrt_innov = (max(0.0, 1.0 - factor_phi**2)) ** 0.5
             prev_factor: Optional[np.ndarray] = None
-            ever_defaulted = np.zeros((n_simulations, n_assets), dtype=bool)
+            ever_defaulted = np.zeros((n_chunk, n_assets), dtype=bool)
+            chunk_losses = np.zeros((n_chunk, n_assets))
             for period in range(n_periods):
-                innovation = (
-                    rng.normal(size=(n_simulations, n_sectors)) @ sector_cholesky.T
-                )
+                innovation = rng.normal(size=(n_chunk, n_sectors)) @ sector_cholesky.T
                 if prev_factor is None:
                     sector_factor_all = innovation
                 else:
@@ -828,7 +891,7 @@ class TwoFactorPortfolio(BaseSimulator):
                 prev_factor = sector_factor_all
                 asset_sector_factors = sector_factor_all[:, asset_sector_ids]
 
-                idiosyncratic = rng.normal(size=(n_simulations, n_assets))
+                idiosyncratic = rng.normal(size=(n_chunk, n_assets))
                 asset_values = (
                     sector_loadings[np.newaxis, :] * asset_sector_factors
                     + idio_loadings[np.newaxis, :] * idiosyncratic
@@ -845,20 +908,36 @@ class TwoFactorPortfolio(BaseSimulator):
                     # in stress.
                     lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
                     lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(
-                        size=(n_simulations, n_assets)
+                        size=(n_chunk, n_assets)
                     )
                     lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
                     period_losses = lgd_realized * asset_exposures[np.newaxis, :]
-                    losses = np.where(new_defaults, period_losses, losses)
+                    chunk_losses = np.where(new_defaults, period_losses, chunk_losses)
 
                 ever_defaulted |= new_defaults
+            return chunk_losses
 
-        total_losses = losses.sum(axis=1)
+        chunk_losses_fn = (
+            _copula_chunk_losses
+            if default_timing == "copula"
+            else _frailty_chunk_losses
+        )
 
-        sector_losses: Dict[str, np.ndarray] = {}
-        for s_idx, sector in enumerate(self.sector_names):
-            mask = asset_sector_ids == s_idx
-            sector_losses[sector] = losses[:, mask].sum(axis=1)
+        total_losses = np.empty(n_simulations)
+        sector_loss_mat = np.zeros((n_simulations, n_sectors))
+        for start in range(0, n_simulations, chunk):
+            stop = min(start + chunk, n_simulations)
+            chunk_losses = chunk_losses_fn(stop - start)
+            total_losses[start:stop] = chunk_losses.sum(axis=1)
+            for s, cols in enumerate(sector_asset_cols):
+                if cols.size:
+                    sector_loss_mat[start:stop, s] = chunk_losses[:, cols].sum(axis=1)
+            del chunk_losses
+
+        sector_losses: Dict[str, np.ndarray] = {
+            sector: sector_loss_mat[:, s_idx]
+            for s_idx, sector in enumerate(self.sector_names)
+        }
 
         def calculate_stats(loss_arr: np.ndarray) -> Dict[str, float]:
             p95, p99, p999 = np.percentile(loss_arr, [95, 99, 99.9])
