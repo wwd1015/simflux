@@ -2,193 +2,106 @@
 
 ## Executive Summary
 
-SimFlux provides **dual-backend architecture** with significant performance differences:
+SimFlux ships a **dual backend**: a Rust extension (the default when the compiled
+wheel is available) and a pure-NumPy fallback. Both honor the same API; the Rust
+backend exists for speed and memory.
 
-- **Rust Backend**: High-performance production-ready implementation
-- **NumPy Fallback**: Compatible development implementation
+**Measured results** (see methodology below): the Rust backend is **~2.6–45x
+faster** than the NumPy fallback across every workload. Memory is **comparable to
+much lower**: portfolios use **10–100x less** memory in Rust (sparse interim
+storage), single-asset GBM about **half**, and correlated GBM is **at parity**.
 
-**Key Results**: Rust backend delivers **3-14x speedup** and **3-5x memory efficiency** over NumPy fallback.
+> These are indicative numbers from one machine (Apple Silicon, release build).
+> Absolute times are hardware-dependent — the **ratios** are what carry across
+> machines. Reproduce locally with `python benchmarks/performance_comparison.py`.
 
-## Benchmark Environment
+## Methodology
 
-- Hands-on instructions for running ad-hoc benchmarks are available in
-  [`user_guide.md`](./user_guide.md).
-- Default comparisons in this document are generated using the
-  repository's Rust and NumPy backends.
-- Numbers below assume release builds; expect smaller throughput when
-  running the pure Python fallback locally.
-
-- **Platform**: Various (Linux, macOS, Windows supported)
-- **Python**: 3.8-3.12 compatibility
-- **Test Methodology**: Realistic financial simulation workloads
-- **Metrics**: Execution time, memory usage, throughput
+- **Timing**: wall-clock `time.perf_counter()` around a single simulation call.
+- **Memory**: each (workload, backend) runs in its own **subprocess**, and memory
+  is the kernel's **peak RSS** (`ru_maxrss`) reached during the call above the
+  pre-call baseline. Subprocess isolation prevents GC and allocator caching from
+  one workload contaminating another, and peak RSS captures the Rust backend's
+  allocations too (they live outside Python's allocator, so `tracemalloc` would
+  miss them). The reported memory figure is **Rust ÷ NumPy** — values below 1.0
+  mean Rust uses less.
+- The fallback path is exercised directly via the engine's `_numpy_*` methods.
 
 ## Detailed Results
 
-### 1. Single Asset GBM Simulation
+### 1. Single-Asset GBM
 
-| Test Case | Problem Size | Rust Time | NumPy Time | Speedup | Memory Efficiency |
-|-----------|--------------|-----------|------------|---------|------------------|
-| Small | 1K paths × 252 steps | 0.012s | 0.045s | **3.8x** | **3.2x** |
-| Medium | 10K paths × 252 steps | 0.089s | 0.421s | **4.7x** | **3.4x** |
-| Large | 50K paths × 252 steps | 0.398s | 2.134s | **5.4x** | **3.4x** |
-| Long Term | 10K paths × 1260 steps | 0.445s | 2.098s | **4.7x** | **3.4x** |
+| Problem size | Rust time | NumPy time | Speedup | Rust mem (×NumPy) |
+|---|---|---|---|---|
+| 1K paths × 252 steps | 0.002s | 0.004s | **2.6x** | 0.49x |
+| 10K paths × 252 steps | 0.012s | 0.039s | **3.3x** | 0.41x |
+| 50K paths × 252 steps | 0.064s | 0.205s | **3.2x** | 0.41x |
+| 10K paths × 1260 steps | 0.051s | 0.195s | **3.8x** | 0.40x |
 
-**Key Insights:**
-- Rust shows **consistent 3-5x speedup** across problem sizes
-- **Throughput scales** from 21M to 32M operations/second (Rust)
-- NumPy performance plateaus around 6M operations/second
-- Memory usage **3x more efficient** with Rust
+Rust is ~3x faster and uses ~40–50% of the fallback's memory. The win comes from
+returning a contiguous NumPy array (not a Python list-of-lists) and parallel
+path generation with Rayon.
 
-### 2. Multi-Asset Correlated GBM Simulation
+### 2. Multi-Asset Correlated GBM
 
-| Test Case | Problem Size | Rust Time | NumPy Time | Speedup | Memory Efficiency |
-|-----------|--------------|-----------|------------|---------|------------------|
-| 2 Assets | 2 assets × 1K paths × 252 steps | 0.023s | 0.156s | **6.8x** | **4.5x** |
-| 5 Assets | 5 assets × 1K paths × 252 steps | 0.034s | 0.298s | **8.8x** | **4.7x** |
-| 10 Assets | 10 assets × 5K paths × 252 steps | 0.167s | 1.845s | **11.0x** | **4.7x** |
-| 20 Assets | 20 assets × 1K paths × 252 steps | 0.089s | 1.234s | **13.9x** | **4.8x** |
+| Problem size | Rust time | NumPy time | Speedup | Rust mem (×NumPy) |
+|---|---|---|---|---|
+| 2 assets × 1K paths × 252 | 0.003s | 0.011s | **4.0x** | 1.21x |
+| 5 assets × 1K paths × 252 | 0.008s | 0.024s | **3.2x** | 1.04x |
+| 10 assets × 5K paths × 252 | 0.044s | 0.206s | **4.7x** | 0.94x |
+| 20 assets × 1K paths × 252 | 0.021s | 0.079s | **3.8x** | 0.97x |
 
-**Key Insights:**
-- **Largest performance gains** in correlated simulations (up to 13.9x)
-- Rust's **parallel correlation** handling shows major advantage
-- **Memory efficiency improves** with more assets (4-5x better)
-- NumPy's correlation matrix operations become bottleneck
+Rust is ~3–5x faster. Memory is **at parity** with NumPy (slightly leaner at
+10+ assets): correlated paths are written inline into one contiguous 3-D buffer,
+so there is no separate randoms buffer and no flattening copy. At trivial sizes
+(2 assets) per-path setup makes Rust marginally heavier (5 MB vs 4 MB).
 
 ### 3. Portfolio Loss Simulation
 
-| Test Case | Problem Size | Rust Time | NumPy Time | Speedup | Memory Efficiency |
-|-----------|--------------|-----------|------------|---------|------------------|
-| Small Portfolio | 50 assets × 1K simulations | 0.156s | 0.698s | **4.5x** | **2.8x** |
-| Medium Portfolio | 200 assets × 5K simulations | 2.134s | 15.678s | **7.3x** | **2.4x** |
-| Large Portfolio | 500 assets × 2K simulations | 3.456s | 28.789s | **8.3x** | **2.9x** |
-| Many Simulations | 100 assets × 10K simulations | 1.789s | 12.456s | **7.0x** | **3.1x** |
+| Problem size | Rust time | NumPy time | Speedup | Rust mem (×NumPy) |
+|---|---|---|---|---|
+| 50 assets × 1K simulations | 0.003s | 0.076s | **30x** | 0.11x |
+| 200 assets × 5K simulations | 0.025s | 0.457s | **18x** | 0.01x |
+| 500 assets × 2K simulations | 0.022s | 1.004s | **45x** | 0.01x |
+| 100 assets × 10K simulations | 0.031s | 0.327s | **11x** | 0.02x |
 
-**Key Insights:**
-- **Portfolio simulations benefit most** from Rust backend (7-8x speedup)
-- Complex **correlation structures** handled much more efficiently
-- **Two-factor model** calculations parallelized effectively
-- Memory efficiency remains strong across portfolio sizes
+The portfolio path is where Rust dominates: **10–45x faster** and **dramatically
+leaner**. It returns a small statistics dictionary (no large array crosses the
+boundary), the Monte Carlo loop parallelizes cleanly, and the NumPy fallback
+materializes `n_simulations × n_assets` intermediate arrays that Rust avoids.
 
-## Performance Scaling Analysis
+## Why the differences exist
 
-### Throughput by Problem Size (GBM)
+**Rust backend** — `Python API → PyO3 → Rust engine → Rayon → contiguous NumPy / stats dict`:
+- True parallelism (no GIL) via Rayon work-stealing.
+- Returns contiguous NumPy arrays (zero per-element boxing) and small result
+  dicts for portfolios.
+- Sparse, defaults-only interim storage keeps portfolio memory tiny.
 
-| Problem Size | Rust (M ops/sec) | NumPy (M ops/sec) | Efficiency Ratio |
-|--------------|------------------|-------------------|-----------------|
-| 252K | 21.0 | 5.6 | **3.8x** |
-| 2.52M | 28.3 | 6.0 | **4.7x** |
-| 12.6M | 31.7 | 5.9 | **5.4x** |
-| 12.6M (long) | 28.3 | 6.0 | **4.7x** |
+**NumPy fallback** — `Python API → vectorized NumPy → result`:
+- Vectorized and correct, but allocates large intermediates for portfolios and
+  pays Python-object overhead at the boundary.
+- Single-threaded outside NumPy's own C loops.
 
-### Memory Usage Patterns
+## When each backend matters
 
-| Backend | Small Problems | Large Problems | Scaling Factor |
-|---------|----------------|----------------|----------------|
-| **Rust** | 2-10 MB | 100-250 MB | Linear |
-| **NumPy** | 7-47 MB | 340-690 MB | Super-linear |
+| Use the Rust backend for | The NumPy fallback is fine for |
+|---|---|
+| Production and large-scale runs (>10K paths, >100 assets) | Development, prototyping, small tests |
+| Memory-constrained portfolio simulations | Environments without a binary wheel |
+| Time-critical or batch workloads | Education / quick compatibility checks |
+| Interim Parquet storage of default events | — |
 
-## Function Flow Comparison
+Install the compiled wheel to get the Rust backend automatically; without it,
+SimFlux falls back to NumPy with a warning and identical results (statistically).
 
-### Rust Backend Flow
-```
-Python API → PyO3 Bindings → Rust Engine → Rayon Parallelism → Native Memory → Results
-```
+## Reproducing these numbers
 
-**Advantages:**
-- ✅ **True parallelism** with Rayon work-stealing
-- ✅ **Memory efficient** native allocation  
-- ✅ **SIMD optimization** from Rust compiler
-- ✅ **Zero-copy** data transfers where possible
-
-### NumPy Fallback Flow
-```
-Python API → NumPy Operations → OpenMP (limited) → Python Memory → Results
-```
-
-**Characteristics:**
-- ⚠️ **GIL limitations** restrict parallelism
-- ⚠️ **Higher memory overhead** from Python objects
-- ✅ **Vectorized operations** where possible
-- ⚠️ **Sequential bottlenecks** in correlation handling
-
-## Feature Completeness Matrix
-
-| Feature | Rust Backend | NumPy Fallback | Impact |
-|---------|-------------|----------------|---------|
-| **GBM Simulation** | Full | Full | Equivalent API |
-| **Correlated GBM** | Full | Full | Rust much faster |
-| **Portfolio Modeling** | Full | Simplified | Rust has more features |
-| **Interim Results** | Parquet storage | None | Production advantage |
-| **Statistical Functions** | Full precision | Approximations | Quality difference |
-| **Error Handling** | Comprehensive | Basic | Rust more robust |
-
-## Real-World Performance Implications
-
-### Development Workflow
-```python
-# Development: NumPy fallback (acceptable for small tests)
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(50)
-results = portfolio.simulate(n_simulations=1000)  # ~0.7s
-```
-
-### Production Workflow  
-```python
-# Production: Rust backend (essential for scale)
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(1000)
-results = portfolio.simulate(n_simulations=100000)  # ~30s vs 200s+ fallback
-```
-
-## Deployment Recommendations
-
-### When to Use Rust Backend
-- ✅ **Production environments** requiring high performance
-- ✅ **Large-scale simulations** (>10K paths, >100 assets)
-- ✅ **Memory-constrained** systems
-- ✅ **Time-critical** applications
-- ✅ **Detailed interim analysis** needed
-
-### When NumPy Fallback is Acceptable
-- ✅ **Development and prototyping**
-- ✅ **Small-scale testing** (<1K simulations)
-- ✅ **Educational purposes**
-- ✅ **Environments without** binary wheel support
-- ✅ **Quick compatibility testing**
-
-## Installation Strategy for Artifactory
-
-### Phase 1: Build Binary Wheels
 ```bash
-# CI/CD pipeline with Rust installed
-maturin build --release --out dist/
-# Creates wheels for multiple Python versions and platforms
+pip install psutil           # the benchmark's only extra dependency
+maturin develop --release    # build the Rust extension
+python benchmarks/performance_comparison.py
 ```
 
-### Phase 2: Upload to Internal Artifactory
-```bash
-twine upload --repository-url https://your-artifactory/pypi/local dist/*
-```
-
-### Phase 3: User Installation (No Rust Required)
-```bash
-pip install -i https://your-artifactory/pypi/local simflux
-# Users get Rust performance without Rust installation
-```
-
-### Phase 4: Fallback Compatibility
-```bash
-# If binary wheels fail to install
-pip install -i https://your-artifactory/pypi/local simflux
-# Automatically falls back to NumPy implementation with warning
-```
-
-## Conclusion
-
-The **dual-backend architecture** provides optimal developer and user experience:
-
-1. **Development Phase**: NumPy fallback enables immediate productivity
-2. **Production Phase**: Rust backend delivers enterprise performance  
-3. **Deployment Phase**: Binary wheels eliminate complexity
-4. **Compatibility Phase**: Fallback ensures universal compatibility
-
-**Bottom Line**: Users get **7x average speedup** and **4x memory efficiency** with seamless deployment to internal artifactory, while maintaining full compatibility when needed.
+Each row is printed as `Speedup: Nx faster, Rust uses Mx the memory`, and full
+CSV/text reports are written alongside.

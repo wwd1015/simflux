@@ -200,7 +200,7 @@ for trial in range(n_simulations):
 | **Portfolio Simulation** | ✅ Full | ⚠️ Simplified | Limited statistics |
 | **Interim Results** | ✅ Parquet | ❌ None | No storage in fallback |
 | **Multi-threading** | ✅ Full | ❌ Limited | GIL constraints |
-| **Memory Efficiency** | ✅ Optimal | ⚠️ Higher usage | 2-3x memory usage |
+| **Memory Efficiency** | ✅ Comparable to much lower | ⚠️ Baseline | portfolios 10–100x leaner in Rust |
 | **Error Handling** | ✅ Comprehensive | ⚠️ Basic | Simplified validation |
 | **Statistical Functions** | ✅ Full precision | ⚠️ Approximations | Some approximations used |
 

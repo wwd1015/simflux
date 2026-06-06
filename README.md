@@ -44,17 +44,21 @@ maturin develop --release
 
 | Backend | Use Case | Performance | Memory Usage | Installation |
 |---------|----------|-------------|--------------|--------------|
-| **Rust** | Production | **3-14x faster** | **3-5x more efficient** | Binary wheel |
-| **NumPy Fallback** | Development | Baseline | Higher usage | No compilation needed |
+| **Rust** | Production | **~2.6–45x faster** | comparable to **much lower** | Binary wheel |
+| **NumPy Fallback** | Development | Baseline | Baseline | No compilation needed |
 
 ### Benchmark Results Summary
 
-- **Average Speedup**: 7.2x faster with Rust backend
-- **Maximum Speedup**: Up to 13.9x for correlated simulations  
-- **Memory Efficiency**: 3.6x more memory efficient on average
-- **Throughput**: 28M+ operations/second vs 6M ops/sec (NumPy)
+Measured on Apple Silicon, release build (ratios are representative; absolute
+times are hardware-dependent):
 
-*See [benchmarks/](benchmarks/) directory for detailed performance analysis.*
+- **GBM**: ~2.6–3.8x faster, ~0.4x the memory.
+- **Correlated GBM**: ~3–5x faster, memory at parity.
+- **Portfolio**: ~10–45x faster, **10–100x less** memory (sparse interim storage).
+
+*See [`docs/performance_benchmarks.md`](docs/performance_benchmarks.md) for the
+full tables and methodology, and run `python benchmarks/performance_comparison.py`
+to reproduce.*
 
 ## Key Concepts
 
