@@ -113,7 +113,9 @@ fn py_simulate_gbm_multi<'py>(
         seed,
     )
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    vec3_to_pyarray(py, paths)
+    // `simulate_gbm_correlated` already produced a contiguous Array3, so this is a
+    // move into NumPy with no extra copy.
+    Ok(paths.into_pyarray_bound(py))
 }
 
 #[pyfunction]

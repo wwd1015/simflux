@@ -1,4 +1,4 @@
-use crate::random::{create_rng, generate_correlated_normals_batch, sample_standard_normal};
+use crate::random::{create_rng, sample_standard_normal};
 use nalgebra::{Cholesky, DMatrix};
 use rayon::prelude::*;
 
@@ -91,21 +91,6 @@ pub fn cholesky_decomposition(matrix: Vec<Vec<f64>>) -> Result<Vec<Vec<f64>>, Co
         }
         None => Err(CorrelationError::DecompositionFailed),
     }
-}
-
-/// Correlated standard normals as a flat, sample-major `Vec<f64>` of length
-/// `n_samples * n_factors` (factor `i` of sample `s` at `s * n_factors + i`).
-pub fn generate_correlated_normals(
-    n_samples: usize,
-    correlation_matrix: Vec<Vec<f64>>,
-    seed: Option<u64>,
-) -> Result<Vec<f64>, CorrelationError> {
-    let cholesky = cholesky_decomposition(correlation_matrix)?;
-    let n_factors = cholesky.len();
-
-    Ok(generate_correlated_normals_batch(
-        n_samples, n_factors, &cholesky, seed,
-    ))
 }
 
 pub struct TwoFactorCorrelationStructure {
