@@ -28,13 +28,12 @@ is **at parity**.
   mean Rust uses less.
 - The fallback path is exercised directly via the engine's `_numpy_*` methods
   (and `_fallback_simulate_portfolio` for portfolios).
-- **Portfolio memory parity.** Both backends now reduce each trial to the same
-  summaries (total loss + per-sector loss) rather than the Rust backend reducing
-  while the NumPy fallback held a dense `n_simulations × n_assets` grid. The
-  fallback processes simulations in bounded chunks, so the comparison reflects
-  the backends, not a data-structure choice. These figures are the **scipy-free**
-  fallback; with scipy installed, the fallback's per-asset Beta lookup tables are
-  replaced by scipy's `ppf` and its memory drops further.
+- **Portfolio memory.** Both backends reduce each trial to the same summaries
+  (total loss + per-sector loss), and the fallback processes simulations in
+  bounded chunks, never allocating a dense `n_simulations × n_assets` grid, so the
+  comparison reflects the backends, not a data-structure difference. These figures
+  are the **scipy-free** fallback; with scipy installed, the fallback's per-asset
+  Beta lookup tables are replaced by scipy's `ppf` and its memory drops further.
 
 ## Detailed Results
 
@@ -78,14 +77,12 @@ The portfolio path is where Rust dominates on speed: **10–41x faster**, becaus
 it returns a small statistics dictionary (no large array crosses the boundary)
 and the Monte Carlo loop parallelizes cleanly across cores.
 
-On memory, Rust uses **~8–25x less**. Both backends now reduce each trial on the
-fly to its total and per-sector loss, so neither holds a dense
-`n_simulations × n_assets` grid; the remaining gap is that Rust streams per-trial
-with negligible scratch while the vectorized fallback keeps a bounded
-per-chunk batch (and, on the scipy-free path, O(`n_assets`) Beta lookup tables —
-the 500-asset row above). The earlier "~100x leaner" figure was an artifact of
-the fallback materializing that dense grid; once it reduces per-chunk like Rust,
-the honest ratio is single-to-low-double digits.
+On memory, Rust uses **~8–25x less**. Both backends reduce each trial on the fly
+to its total and per-sector loss, so neither holds a dense
+`n_simulations × n_assets` grid. The remaining gap is that Rust streams per-trial
+with negligible scratch, while the vectorized fallback keeps a bounded per-chunk
+batch (and, on the scipy-free path, O(`n_assets`) Beta lookup tables — the
+500-asset row above).
 
 ## Why the differences exist
 
