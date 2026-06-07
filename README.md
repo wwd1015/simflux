@@ -54,7 +54,8 @@ times are hardware-dependent):
 
 - **GBM**: ~2.6–3.8x faster, ~0.4x the memory.
 - **Correlated GBM**: ~3–5x faster, memory at parity.
-- **Portfolio**: ~10–45x faster, **10–100x less** memory (sparse interim storage).
+- **Portfolio**: ~10–45x faster, **~8–25x less** memory (Rust streams per-trial;
+  the fallback reduces in bounded chunks).
 
 *See [`docs/performance_benchmarks.md`](docs/performance_benchmarks.md) for the
 full tables and methodology, and run `python benchmarks/performance_comparison.py`
@@ -190,27 +191,51 @@ sector_analysis = analyzer.analyze_by_sector()
 
 ### Multi-Period Portfolio Simulation
 
-Simulate losses over multiple periods with quarterly PD term structures and default timing:
+A **portfolio is a list of obligors** (`AssetData`). One simulation path draws the
+shared systematic (sector) factors once, then each obligor's idiosyncratic factor,
+so every asset's default is decided *jointly* within that path — correlated through
+the sectors they share. `n_simulations` is the number of such independent paths;
+each path simulates the whole portfolio over `n_periods` steps.
 
 ```python
-# Define assets with cumulative PD term structure (quarterly over 2 years)
-asset = sf.AssetData(
-    asset_id=0, sector_id=0, pd=0.06,
-    lgd_mean=0.5, lgd_std=0.1, exposure=1_000_000,
-    sector_name="Tech",
-    pd_term_structure=[0.01, 0.025, 0.04, 0.06],  # cumulative PDs at Q1–Q4
+# Cumulative PD by the end of each quarter — one value per period, ending at 0.06.
+# It must be at least as long as n_periods (here: 8 quarters = 2 years).
+tech_curve = [0.008, 0.016, 0.024, 0.031, 0.038, 0.045, 0.052, 0.060]
+
+# Build the obligors, then assemble them into a portfolio.
+assets = [
+    sf.AssetData(
+        asset_id=i, sector_id=0, pd=0.06,
+        lgd_mean=0.5, lgd_std=0.1, exposure=1_000_000,
+        sector_name="Tech",
+        pd_term_structure=tech_curve,
+    )
+    for i in range(50)
+]
+portfolio = sf.TwoFactorPortfolio(assets, intra_sector_correlations=0.2)
+
+# Each of the 100k paths simulates all 50 obligors jointly over 8 quarters.
+results = portfolio.simulate(
+    n_simulations=100_000,
+    n_periods=8,            # 8 quarters
+    period_length=0.25,     # each quarter = 0.25 years
+    default_timing="copula",
 )
 
-# Simulate with quarterly time steps
-results = portfolio.simulate(
-    n_simulations=100000,
-    n_periods=8,          # 8 quarters
-    period_length=0.25,   # each quarter = 0.25 years
-)
-# Results include time_to_default for each asset in each trial
+# `results` is a summary dict: portfolio- and sector-level loss statistics.
+print(results["portfolio_statistics"]["var_99"])
+
+# Per-default detail (which obligor defaulted, in which period, its
+# time_to_default and the factors at default) is written to Parquet when you pass
+# StorageConfig(store_interim=True, output_path=...); read it back with
+# ParquetResultsAnalyzer.
 ```
 
-When no `pd_term_structure` is provided, the flat `pd` is spread across periods assuming a constant hazard rate.
+A `pd_term_structure` **longer** than `n_periods` is fine — it runs a sub-horizon
+(the first `n_periods` points are used). A structure **shorter** than `n_periods`
+raises `RuntimeError`: the later periods would have no cumulative PD. When no
+`pd_term_structure` is provided, the flat `pd` is spread across periods assuming a
+constant hazard rate.
 
 ## Methodology
 
