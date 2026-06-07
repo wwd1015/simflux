@@ -86,7 +86,9 @@ jobs:
     - name: Install wheel + test deps
       run: |
         pip install --find-links dist simflux
-        pip install pytest
+        # pytest-benchmark provides the --benchmark-skip flag used below (matches
+        # ci.yml); without it pytest errors on the unrecognized argument.
+        pip install pytest pytest-benchmark
 
     - name: Smoke test
       run: |
