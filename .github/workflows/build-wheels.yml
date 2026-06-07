@@ -15,7 +15,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+        # macos-latest is Apple Silicon (arm64). macos-13 (Intel/x86_64) is
+        # omitted: its runner is consistently cancelled at allocation, which
+        # cascaded through test_wheels -> release and blocked every wheel
+        # release. Intel-mac users build from the sdist.
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
     - uses: actions/checkout@v4
