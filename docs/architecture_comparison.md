@@ -209,10 +209,10 @@ for trial in range(n_simulations):
 ### Rust Backend
 ```toml
 # Core dependencies only
-numpy>=1.21.0
-pandas>=1.3.0  
-polars>=0.20.0
-pyarrow>=10.0.0
+numpy>=2.2
+pandas>=3.0
+polars>=1.38
+pyarrow>=18.0
 ```
 
 ### NumPy Fallback

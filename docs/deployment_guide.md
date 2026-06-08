@@ -9,7 +9,7 @@ This guide shows how to build and deploy SimFlux binary wheels to your internal 
 ✅ **No Rust dependency** for end users  
 ✅ **Automatic fallback** to NumPy if binary wheels unavailable  
 ✅ **Cross-platform support** (Linux, macOS, Windows)  
-✅ **Multiple Python versions** (3.8-3.12)  
+✅ **Python 3.12+** (one forward-compatible abi3 wheel per platform)  
 ✅ **~2.6–45x faster** with the Rust backend (10–45x for portfolios)  
 
 ## Build Process
@@ -41,7 +41,9 @@ jobs:
       uses: PyO3/maturin-action@v1
       with:
         target: ${{ matrix.target }}
-        args: --release --out dist --interpreter 3.8 3.9 3.10 3.11 3.12
+        # abi3 (Cargo.toml's abi3-py312 feature) builds ONE forward-compatible
+        # wheel per platform that installs on Python 3.12+ — no per-version matrix.
+        args: --release --out dist --find-interpreter
         sccache: 'true'
         manylinux: auto
         
@@ -83,13 +85,8 @@ rm -rf dist/ build/ target/
 # Install maturin
 pip install maturin
 
-# Build for current platform, multiple Python versions
-for python_ver in 3.8 3.9 3.10 3.11 3.12; do
-    if command -v python${python_ver} &> /dev/null; then
-        echo "Building for Python ${python_ver}..."
-        maturin build --release --interpreter python${python_ver}
-    fi
-done
+# Build one abi3 wheel for the current platform (installs on Python 3.12+).
+maturin build --release --out dist
 
 echo "Build complete. Wheels in dist/:"
 ls -la dist/
@@ -110,18 +107,15 @@ FROM quay.io/pypa/manylinux2014_x86_64
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Install Python versions and maturin
-RUN for PYVER in cp38-cp38 cp39-cp39 cp310-cp310 cp311-cp311 cp312-cp312; do \
-    /opt/python/$PYVER/bin/pip install maturin; \
-done
+# Install maturin (Python 3.12 is enough — the wheel is abi3, 3.12+)
+RUN /opt/python/cp312-cp312/bin/pip install maturin
 
 WORKDIR /workspace
 COPY . .
 
-# Build wheels for all Python versions
-RUN for PYVER in cp38-cp38 cp39-cp39 cp310-cp310 cp311-cp311 cp312-cp312; do \
-    /opt/python/$PYVER/bin/maturin build --release --interpreter /opt/python/$PYVER/bin/python; \
-done
+# Build one abi3 wheel (installs on Python 3.12+); no per-version loop.
+RUN /opt/python/cp312-cp312/bin/maturin build --release \
+    --interpreter /opt/python/cp312-cp312/bin/python
 
 # Repair wheels for broad compatibility
 RUN for wheel in dist/*.whl; do \
@@ -187,9 +181,9 @@ pip install simflux
 ```txt
 # requirements.txt
 --extra-index-url https://your-artifactory.com/pypi/local
-simflux>=0.1.0
-numpy>=1.21.0
-pandas>=1.3.0
+simflux>=0.5.0
+numpy>=2.2
+pandas>=3.0
 ```
 
 ## Deployment Validation

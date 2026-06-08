@@ -258,11 +258,12 @@ Pre-built wheels with the compiled Rust backend are attached to [GitHub Releases
 - **Python 3.12 and 3.13**
 
 ```bash
-# Install directly from a GitHub release (replace v0.1.0 with the actual tag)
-pip install simflux --find-links https://github.com/wwd1015/simflux/releases/download/v0.1.0/
+# Install directly from a GitHub release (use the latest tag)
+pip install simflux --find-links https://github.com/wwd1015/simflux/releases/download/v0.5.0/
 
-# Or download the .whl file for your platform and install locally
-pip install simflux-0.1.0-cp312-cp312-manylinux_2_17_x86_64.whl
+# Or download the .whl file for your platform and install locally.
+# Wheels are abi3 (cp312-abi3): one wheel per platform, installs on Python 3.12+.
+pip install simflux-0.5.0-cp312-abi3-manylinux_2_17_x86_64.whl
 ```
 
 No Rust toolchain required when using pre-built wheels.
