@@ -267,7 +267,7 @@ sector_corr = np.array([
 ])
 
 # Create a portfolio with realistic sector distribution
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+portfolio = sf.CreditPortfolio.create_sample_portfolio(
     n_assets_per_sector=[50, 30, 20],
     sectors=["Technology", "Finance", "Healthcare"],
     sector_correlation_matrix=sector_corr,
@@ -358,7 +358,7 @@ sector_corr = np.array([
 ])
 
 # Build portfolio from detailed data
-portfolio = sf.TwoFactorPortfolio(
+portfolio = sf.CreditPortfolio(
     assets=asset_table,
     sector_correlation_matrix=sector_corr,
 )
@@ -476,7 +476,7 @@ for sector, sector_stats in results["sector_statistics"].items():
 ```python
 import pandas as pd
 
-base = sf.TwoFactorPortfolio.create_sample_portfolio(
+base = sf.CreditPortfolio.create_sample_portfolio(
     n_assets_per_sector=50,
     sectors=["Technology", "Finance"],
 )
@@ -484,7 +484,7 @@ base = sf.TwoFactorPortfolio.create_sample_portfolio(
 rows = []
 for cross_corr in [0.05, 0.15, 0.30, 0.50]:
     sector_corr = np.array([[1.0, cross_corr], [cross_corr, 1.0]])
-    scenario = sf.TwoFactorPortfolio(
+    scenario = sf.CreditPortfolio(
         assets=base.assets,
         intra_sector_correlations=0.4,
         sector_correlation_matrix=sector_corr,
@@ -530,7 +530,7 @@ multi_paths, t = time_block("Correlated GBM", multi.simulate, 5_000, 252, 1.0)
 print(f"  Throughput ~ {(np.prod(multi_paths.shape))/t:,.0f} ops/s")
 
 sector_corr = np.array([[1.0, 0.15], [0.15, 1.0]])
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+portfolio = sf.CreditPortfolio.create_sample_portfolio(
     n_assets_per_sector=25,
     sectors=["Technology", "Finance"],
     sector_correlation_matrix=sector_corr,
@@ -564,7 +564,7 @@ paths = gbm.simulate(n_paths=1000, n_steps=252)
 print(f"Fallback paths shape: {paths.shape}")
 
 sector_corr = np.array([[1.0, 0.15], [0.15, 1.0]])
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(20, ["Technology", "Finance"], sector_correlation_matrix=sector_corr)
+portfolio = sf.CreditPortfolio.create_sample_portfolio(20, ["Technology", "Finance"], sector_correlation_matrix=sector_corr)
 stats = portfolio.simulate(n_simulations=5_000)["portfolio_statistics"]
 print(f"Mean loss (fallback): {stats['mean']:,.0f}")
 ```

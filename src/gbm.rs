@@ -316,13 +316,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(paths.len(), 5); // n_paths
-        assert_eq!(paths[0].len(), 2); // n_assets
-        assert_eq!(paths[0][0].len(), 11); // n_steps + 1
+        assert_eq!(paths.shape(), [5, 2, 11]); // (n_paths, n_assets, n_steps + 1)
 
         // Check starting values
-        assert_eq!(paths[0][0][0], 100.0);
-        assert_eq!(paths[0][1][0], 50.0);
+        assert_eq!(paths[[0, 0, 0]], 100.0);
+        assert_eq!(paths[[0, 1, 0]], 50.0);
     }
 
     #[test]

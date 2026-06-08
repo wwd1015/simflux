@@ -125,7 +125,7 @@ class TestAssetDataBoundaries:
 
 
 # ---------------------------------------------------------------------------
-# TwoFactorPortfolio edge cases
+# CreditPortfolio edge cases
 # ---------------------------------------------------------------------------
 
 class TestPortfolioEdgeCases:
@@ -133,7 +133,7 @@ class TestPortfolioEdgeCases:
 
     def test_single_asset_portfolio(self):
         assets = [sf.AssetData(0, 0, 0.05, 0.5, 0.1, 1_000_000, "A")]
-        p = sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=0.3)
+        p = sf.CreditPortfolio(assets=assets, intra_sector_correlations=0.3)
         results = p.simulate(n_simulations=100)
         assert results["n_assets"] == 1
         assert results["n_sectors"] == 1
@@ -144,7 +144,7 @@ class TestPortfolioEdgeCases:
             sf.AssetData(i, 0, 0.05, 0.5, 0.1, 500_000, "Only")
             for i in range(5)
         ]
-        p = sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=0.4)
+        p = sf.CreditPortfolio(assets=assets, intra_sector_correlations=0.4)
         results = p.simulate(n_simulations=50)
         assert len(results["sector_statistics"]) == 1
         assert "Only" in results["sector_statistics"]

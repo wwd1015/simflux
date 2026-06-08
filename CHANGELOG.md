@@ -6,6 +6,37 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-08
+
+### Added
+
+- **Per-obligor (heterogeneous) intra-sector correlation.** `AssetData.intra_sector_correlation`
+  is now honored per obligor: an obligor loads on its sector factor with its own
+  `rho_i` (`V_i = sqrt(rho_i)*F_sector + sqrt(1-rho_i)*eps_i`), falling back to the
+  sector-level value when unset. Obligors within a sector may differ; the previous
+  homogeneity requirement (which *raised* on mixed values) is gone. Both backends
+  honor it and `CreditPortfolio.asset_intra_correlations` exposes the resolved
+  per-obligor loadings.
+- **Time-varying LGD.** `AssetData.lgd_term_structure` gives a per-period LGD Beta
+  *mean*; an obligor that defaults in period `k` draws LGD from the Beta with mean
+  `lgd_term_structure[k]` (clamped to the last entry) and the constant `lgd_std`.
+  A constant term structure reduces exactly to the flat `lgd_mean`. Works in both
+  the `copula` and `frailty` default-timing models.
+
+### Changed
+
+- **Docs.** The README's single-period and multi-period portfolio sections are
+  merged into one (single-period is just `n_periods=1`), and now show how
+  `AssetData` is actually constructed (explicit list and `from_dataframe`).
+
+### Breaking changes
+
+- **`TwoFactorPortfolio` renamed to `CreditPortfolio`.** The model is a
+  multi-sector, single-systematic-factor Gaussian copula (the analytic test pins
+  the Vasicek single-factor limit); "two-factor" read as a factor *count* and
+  caused confusion. This is a clean rename with no alias — update imports from
+  `TwoFactorPortfolio` to `CreditPortfolio`.
+
 ## [0.4.3] — 2026-06-07
 
 ### Changed

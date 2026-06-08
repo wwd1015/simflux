@@ -36,7 +36,7 @@ def test_vasicek_asrf_golden_master():
     nd = NormalDist()  # stdlib normal — independent of scipy and of the library
 
     assets = [sf.AssetData(i, 0, PD, LGD, 0.02, EXPOSURE, "A") for i in range(N_ASSETS)]
-    port = sf.TwoFactorPortfolio(
+    port = sf.CreditPortfolio(
         assets=assets,
         intra_sector_correlations=RHO,
         systematic_lgd_correlation=0.0,          # decouple LGD from the cycle

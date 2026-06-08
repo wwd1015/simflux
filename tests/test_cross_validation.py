@@ -23,7 +23,7 @@ import simflux as sf
 from simflux.core.backend import Backend
 from simflux.core.base import SimulationConfig
 from simflux.core.engine import SimulationEngine
-from simflux.portfolio.two_factor_model import TwoFactorPortfolio
+from simflux.portfolio.two_factor_model import CreditPortfolio
 
 try:
     import scipy  # noqa: F401
@@ -240,7 +240,7 @@ class TestPortfolioCrossValidation:
                          "A" if i % 2 == 0 else "B")
             for i in range(20)
         ]
-        return sf.TwoFactorPortfolio(
+        return sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.35,
             config=SimulationConfig(seed=seed),
         )
@@ -299,14 +299,14 @@ class TestPortfolioCrossValidation:
         singular = np.array([[1.0, 1.0], [1.0, 1.0]])  # eigenvalues [0, 2]: PSD, singular
 
         with pytest.raises(ValueError, match="positive definite"):
-            sf.TwoFactorPortfolio(assets=assets, sector_correlation_matrix=singular)
+            sf.CreditPortfolio(assets=assets, sector_correlation_matrix=singular)
 
         with patch.object(Backend, "is_available", return_value=False), \
              patch.object(Backend, "get_rust", return_value=None):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 with pytest.raises(ValueError, match="positive definite"):
-                    sf.TwoFactorPortfolio(assets=assets, sector_correlation_matrix=singular)
+                    sf.CreditPortfolio(assets=assets, sector_correlation_matrix=singular)
 
     @pytest.mark.skipif(not Backend.is_available(), reason="Rust backend required")
     def test_multi_period_portfolio(self):
@@ -320,7 +320,7 @@ class TestPortfolioCrossValidation:
             for i in range(20)
         ]
 
-        p_rust = sf.TwoFactorPortfolio(
+        p_rust = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.35,
             config=SimulationConfig(seed=300),
         )
@@ -330,7 +330,7 @@ class TestPortfolioCrossValidation:
              patch.object(Backend, "get_rust", return_value=None):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                p_np = sf.TwoFactorPortfolio(
+                p_np = sf.CreditPortfolio(
                     assets=assets, intra_sector_correlations=0.35,
                     config=SimulationConfig(seed=400),
                 )
@@ -359,21 +359,21 @@ class TestConditionalPDDeterministic:
     """
 
     def test_flat_single_period(self):
-        assert TwoFactorPortfolio._conditional_pd_flat(0.1, 1) == pytest.approx(0.1)
+        assert CreditPortfolio._conditional_pd_flat(0.1, 1) == pytest.approx(0.1)
 
     def test_flat_constant_hazard_compounds_back(self):
         pd, n = 0.10, 4
-        cond = TwoFactorPortfolio._conditional_pd_flat(pd, n)
+        cond = CreditPortfolio._conditional_pd_flat(pd, n)
         # A constant per-period hazard must compound back to the cumulative PD.
         assert 1 - (1 - cond) ** n == pytest.approx(pd)
 
     def test_term_structure_forward_pd(self):
         ts = [0.02, 0.05, 0.08, 0.10]
-        f = TwoFactorPortfolio._conditional_pd_from_term_structure
+        f = CreditPortfolio._conditional_pd_from_term_structure
         assert f(ts, 0) == pytest.approx(0.02)
         assert f(ts, 1) == pytest.approx((0.05 - 0.02) / (1 - 0.02))
         assert f(ts, 3) == pytest.approx((0.10 - 0.08) / (1 - 0.08))
 
     def test_term_structure_saturated(self):
         # Once cumulative PD reaches 1.0 the forward PD is 0.
-        assert TwoFactorPortfolio._conditional_pd_from_term_structure([1.0, 1.0], 1) == 0.0
+        assert CreditPortfolio._conditional_pd_from_term_structure([1.0, 1.0], 1) == 0.0

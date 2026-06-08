@@ -24,7 +24,7 @@ from simflux.core.base import SimulationConfig
 
 def _run(n_periods, timing, *, fp=0.5, rho_lgd=0.0, intra=0.4, force_numpy=False, n_sims=30_000):
     assets = [sf.AssetData(i, 0, 0.08, 0.5, 0.1, 1.0, "A") for i in range(200)]
-    port = sf.TwoFactorPortfolio(
+    port = sf.CreditPortfolio(
         assets=assets, intra_sector_correlations=intra,
         systematic_lgd_correlation=rho_lgd, sector_correlation_matrix=[[1.0]],
         config=SimulationConfig(seed=2024),
@@ -87,7 +87,7 @@ def test_result_stamps_mode_and_persistence():
 
 def test_invalid_inputs_rejected():
     assets = [sf.AssetData(0, 0, 0.05, 0.5, 0.1, 1.0, "A")]
-    port = sf.TwoFactorPortfolio(assets=assets, sector_correlation_matrix=[[1.0]])
+    port = sf.CreditPortfolio(assets=assets, sector_correlation_matrix=[[1.0]])
     # "hazard" was removed as a named mode.
     with pytest.raises(ValueError, match="default_timing must be"):
         port.simulate(n_simulations=10, default_timing="hazard")

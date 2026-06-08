@@ -104,7 +104,7 @@ for step in range(n_steps):
 #### Rust Backend Flow
 ```mermaid
 graph TD
-    A[Python TwoFactorPortfolio.simulate()] --> B[Rust PortfolioConfig]
+    A[Python CreditPortfolio.simulate()] --> B[Rust PortfolioConfig]
     B --> C[Two-factor correlation structure]
     C --> D[Parallel systematic factor generation]
     D --> E[Parallel asset simulation]
@@ -136,7 +136,7 @@ let trial_results: Vec<TrialResult> = (0..n_simulations)
 #### NumPy Fallback Flow
 ```mermaid
 graph TD
-    A[Python TwoFactorPortfolio.simulate()] --> B[NumPy fallback implementation]
+    A[Python CreditPortfolio.simulate()] --> B[NumPy fallback implementation]
     B --> C[Sequential systematic factors]
     C --> D[Asset-by-asset simulation]
     D --> E[Approximate beta distribution]
@@ -209,10 +209,10 @@ for trial in range(n_simulations):
 ### Rust Backend
 ```toml
 # Core dependencies only
-numpy>=1.21.0
-pandas>=1.3.0  
-polars>=0.20.0
-pyarrow>=10.0.0
+numpy>=2.2
+pandas>=3.0
+polars>=1.38
+pyarrow>=18.0
 ```
 
 ### NumPy Fallback
@@ -262,7 +262,7 @@ paths = gbm.simulate(n_paths=100000, n_steps=252)  # Production scale
 ```python
 import simflux as sf
 
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(1000)
+portfolio = sf.CreditPortfolio.create_sample_portfolio(1000)
 results = portfolio.simulate(
     n_simulations=1000000,  # Large scale
     storage_config=sf.StorageConfig(

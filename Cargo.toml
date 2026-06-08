@@ -1,17 +1,26 @@
 [package]
 name = "simflux"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 
 [lib]
 name = "simflux"
-crate-type = ["cdylib"]
+# rlib so the in-crate unit tests can link the library; cdylib for the wheel.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `extension-module` tells pyo3 not to link libpython (the interpreter provides
+# the symbols at load time) — correct for the wheel, but it makes `cargo test`
+# fail to link. Gate it behind a default feature so `cargo test
+# --no-default-features` builds a normally-linked test binary.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 # abi3-py312: build a single forward-compatible wheel for CPython 3.12+ so wheel
 # builds don't break when a runner ships a Python newer than pyo3's max (the CI
 # --find-interpreter previously picked up 3.14, which pyo3 0.23 rejects).
-pyo3 = { version = "0.23", features = ["extension-module", "abi3-py312"] }
+pyo3 = { version = "0.23", features = ["abi3-py312"] }
 numpy = "0.23"
 ndarray = "0.16"
 rand = "0.8"

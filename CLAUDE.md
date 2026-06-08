@@ -19,7 +19,7 @@ make build                   # Build release
 python/simflux/
   core/       - Backend (registry), SimulationEngine (Rust/NumPy dispatcher), BaseSimulator (ABC), SimulationConfig
   processes/  - GBM, CorrelatedGBM, TimeVaryingGBM, TimeVaryingCorrelatedGBM
-  portfolio/  - TwoFactorPortfolio, AssetData, TwoFactorCorrelationStructure
+  portfolio/  - CreditPortfolio (credit loss model), AssetData, TwoFactorCorrelationStructure
   utils/      - ParquetResultsAnalyzer, StorageConfig, random/correlation utilities
 src/          - Rust backend (gbm.rs, portfolio.rs, correlation.rs, storage.rs)
 ```
@@ -27,7 +27,7 @@ src/          - Rust backend (gbm.rs, portfolio.rs, correlation.rs, storage.rs)
 ### Key Design Patterns
 - **Strategy**: Backend class (centralized registry) selects Rust or NumPy backend via `Backend.is_available()`
 - **Template Method**: BaseSimulator defines validation framework, subclasses specialize
-- **Factory**: `AssetData.from_dataframe()`, `TwoFactorPortfolio.create_sample_portfolio()`
+- **Factory**: `AssetData.from_dataframe()`, `CreditPortfolio.create_sample_portfolio()`
 - **Lazy Loading**: ParquetResultsAnalyzer uses Polars lazy frames
 
 ### Class Hierarchy
@@ -37,7 +37,7 @@ BaseSimulator (ABC)
 ├── CorrelatedGBM               # Multi-asset with correlation matrix (Rust: simulate_gbm_multi)
 ├── TimeVaryingGBM              # Time-varying mu/sigma (Rust: simulate_gbm_tv)
 ├── TimeVaryingCorrelatedGBM    # Multi-asset time-varying (Rust: simulate_gbm_tv_multi)
-└── TwoFactorPortfolio          # Credit portfolio (Rust: simulate_portfolio)
+└── CreditPortfolio             # Credit portfolio (Rust: simulate_portfolio)
 
 SimulationEngine                # NOT a BaseSimulator — standalone backend dispatcher
 ```
@@ -54,7 +54,7 @@ User API → Simulator class → validate_inputs() → SimulationEngine
 - Correlation matrices validated: symmetric, diagonal=1, values in [-1,1], positive definite
 - `safe_cholesky()` in `utils/random_utils.py` is the **single** decompose-or-repair primitive every correlated sampler crosses — it repairs near-singular matrices and raises `ValueError` (never a raw `LinAlgError`). Do not call `np.linalg.cholesky` directly in samplers.
 - Validation is split by *kind*, not by location. **Parameter invariants** (`sigma>0`, `s0>0`, matching lengths, positive-definite correlation) are written **once** as shared validators in `core/validation.py` and called from **both** seams that need them: the simulator constructor (`validate_inputs`, for early/clear construction-time errors) and `SimulationEngine` (which is independently callable, so it self-validates). One validator, two call sites — no copy-paste, all four GBM-family simulators consistent. The `s0_label` argument lets each seam name the parameter as its caller passed it (`S0` on the simulator, `s0` on the engine). **Per-run dimension invariants** (`n_paths`/`n_steps`/`T`) are not parameter invariants and remain solely on the engine (`_validate_sim_dims`).
-- `TwoFactorPortfolio.simulate()` returns a `PortfolioResult` (`TypedDict`); both backends emit the identical key set, with `n_trials` stamped uniformly in Python. The full sector correlation matrix is the sole correlation input at the Rust seam (no scalar `inter_sector_correlation`).
+- `CreditPortfolio.simulate()` returns a `PortfolioResult` (`TypedDict`); both backends emit the identical key set, with `n_trials` stamped uniformly in Python. The full sector correlation matrix is the sole correlation input at the Rust seam (no scalar `inter_sector_correlation`).
 - `StorageConfig` exposes only honored fields: `store_interim`, `output_path`, `batch_size`. `ParquetResultsAnalyzer` column names live in `utils/storage.py::Columns` (mirror of `src/storage.rs`).
 - All simulators inherit from BaseSimulator; SimulationEngine does NOT
 - Use `Backend.is_available()` / `Backend.get_rust()` for Rust detection — never module-level flags

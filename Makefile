@@ -1,7 +1,7 @@
 # SimFlux Makefile - Unified development workflow
 # This provides convenient shortcuts for common development tasks
 
-.PHONY: help install clean build test lint format check dev wheels ci-build docs all
+.PHONY: help install clean build test test-rust lint format check dev wheels ci-build docs all
 
 # Default Python version for development (requires 3.12+)
 PYTHON ?= python3.12
@@ -68,6 +68,9 @@ ci-build: ## Build for CI/CD (all platforms)
 
 test: ## Run all tests
 	$(PYTHON) -m pytest tests/ -v
+
+test-rust: ## Run the Rust unit tests (links libpython; needs python on PATH)
+	cargo test --no-default-features
 
 test-fast: ## Run tests without benchmarks
 	$(PYTHON) -m pytest tests/ -v --benchmark-skip
@@ -155,7 +158,7 @@ example-portfolio: ## Run portfolio example
 import simflux as sf; \
 import numpy as np; \
 print('Running portfolio example...'); \
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio([10, 10], ['Tech', 'Finance']); \
+portfolio = sf.CreditPortfolio.create_sample_portfolio([10, 10], ['Tech', 'Finance']); \
 results = portfolio.simulate(n_simulations=100); \
 stats = results['portfolio_statistics']; \
 print(f'Portfolio VaR 95%: {stats[\"var_95\"]:,.0f}'); \

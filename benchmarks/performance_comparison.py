@@ -92,7 +92,7 @@ def _build_call(spec: Dict):
         )
 
     if test == "Portfolio":
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=spec["n_assets"] // 2,
             sectors=["Technology", "Finance"],
             inter_sector_correlation=0.15,

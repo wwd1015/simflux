@@ -84,7 +84,7 @@ class TestIntegrationWorkflows:
             [0.1, 0.15, 1.0]
         ])
 
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=n_assets_per_sector,
             sectors=sectors,
             sector_correlation_matrix=sector_corr,
