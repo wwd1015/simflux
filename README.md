@@ -218,6 +218,14 @@ than `n_periods` runs a sub-horizon (the first `n_periods` points are used); a
 structure **shorter** than `n_periods` raises `RuntimeError`; with no term
 structure the flat `pd` is spread across periods at a constant hazard rate.
 
+**Heterogeneous and time-varying obligors.** `AssetData` accepts two optional
+per-obligor curves beyond `pd_term_structure`: `intra_sector_correlation` (this
+obligor's own sector loading `rho_i`, so obligors in a sector may load
+differently — it falls back to the sector value when unset), and
+`lgd_term_structure` (a per-period LGD *mean* — an obligor defaulting in period
+`k` draws LGD from the Beta with that period's mean, `lgd_std` constant). A
+constant `lgd_term_structure` reduces exactly to the flat `lgd_mean`.
+
 **Per-default detail.** Store interim results to Parquet to recover which obligor
 defaulted, in which period, its `time_to_default`, and the factors at default:
 
