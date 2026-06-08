@@ -922,23 +922,3 @@ class CreditPortfolio(BaseSimulator):
             kwargs["sector_correlation_matrix"] = matrix
 
         return cls(assets, **kwargs)
-
-
-class TwoFactorPortfolio(CreditPortfolio):
-    """Deprecated alias for :class:`CreditPortfolio`.
-
-    Renamed because the model is a multi-sector, single-systematic-factor Gaussian
-    copula (the "two factors" were systematic + idiosyncratic per obligor, which
-    read as a factor *count* and caused confusion).  Kept as a thin subclass so
-    existing code keeps working; it emits a ``DeprecationWarning`` and will be
-    removed in a future release.
-    """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        warnings.warn(
-            "TwoFactorPortfolio has been renamed to CreditPortfolio and will be "
-            "removed in a future release; update your imports.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        super().__init__(*args, **kwargs)

@@ -11,7 +11,7 @@ featuring:
 
 from .processes.gbm import GBM, CorrelatedGBM
 from .processes.time_varying import TimeVaryingGBM, TimeVaryingCorrelatedGBM
-from .portfolio.two_factor_model import CreditPortfolio, TwoFactorPortfolio, AssetData
+from .portfolio.two_factor_model import CreditPortfolio, AssetData
 from .portfolio.correlation import TwoFactorCorrelationStructure
 from .utils.storage import StorageConfig, ParquetResultsAnalyzer
 from .utils.random_utils import set_seed
@@ -30,7 +30,6 @@ __all__ = [
     "TimeVaryingCorrelatedGBM",
     # Portfolio modeling
     "CreditPortfolio",
-    "TwoFactorPortfolio",  # deprecated alias for CreditPortfolio
     "AssetData",
     "TwoFactorCorrelationStructure",
     # Storage and utilities

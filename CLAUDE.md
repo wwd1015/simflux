@@ -19,7 +19,7 @@ make build                   # Build release
 python/simflux/
   core/       - Backend (registry), SimulationEngine (Rust/NumPy dispatcher), BaseSimulator (ABC), SimulationConfig
   processes/  - GBM, CorrelatedGBM, TimeVaryingGBM, TimeVaryingCorrelatedGBM
-  portfolio/  - CreditPortfolio (formerly TwoFactorPortfolio, kept as deprecated alias), AssetData, TwoFactorCorrelationStructure
+  portfolio/  - CreditPortfolio (credit loss model), AssetData, TwoFactorCorrelationStructure
   utils/      - ParquetResultsAnalyzer, StorageConfig, random/correlation utilities
 src/          - Rust backend (gbm.rs, portfolio.rs, correlation.rs, storage.rs)
 ```
@@ -37,7 +37,7 @@ BaseSimulator (ABC)
 ├── CorrelatedGBM               # Multi-asset with correlation matrix (Rust: simulate_gbm_multi)
 ├── TimeVaryingGBM              # Time-varying mu/sigma (Rust: simulate_gbm_tv)
 ├── TimeVaryingCorrelatedGBM    # Multi-asset time-varying (Rust: simulate_gbm_tv_multi)
-└── CreditPortfolio             # Credit portfolio (Rust: simulate_portfolio); TwoFactorPortfolio = deprecated alias
+└── CreditPortfolio             # Credit portfolio (Rust: simulate_portfolio)
 
 SimulationEngine                # NOT a BaseSimulator — standalone backend dispatcher
 ```

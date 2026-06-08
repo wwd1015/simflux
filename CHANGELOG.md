@@ -25,14 +25,17 @@ contain breaking changes.
 
 ### Changed
 
-- **`TwoFactorPortfolio` renamed to `CreditPortfolio`.** The model is a
-  multi-sector, single-systematic-factor Gaussian copula (the analytic test pins
-  the Vasicek single-factor limit); "two-factor" read as a factor *count* and
-  caused confusion. `TwoFactorPortfolio` is kept as a thin subclass that emits a
-  `DeprecationWarning`, so existing imports keep working.
 - **Docs.** The README's single-period and multi-period portfolio sections are
   merged into one (single-period is just `n_periods=1`), and now show how
   `AssetData` is actually constructed (explicit list and `from_dataframe`).
+
+### Breaking changes
+
+- **`TwoFactorPortfolio` renamed to `CreditPortfolio`.** The model is a
+  multi-sector, single-systematic-factor Gaussian copula (the analytic test pins
+  the Vasicek single-factor limit); "two-factor" read as a factor *count* and
+  caused confusion. This is a clean rename with no alias — update imports from
+  `TwoFactorPortfolio` to `CreditPortfolio`.
 
 ## [0.4.3] — 2026-06-07
 
