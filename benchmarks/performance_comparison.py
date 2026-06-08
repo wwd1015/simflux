@@ -99,8 +99,18 @@ def _build_call(spec: Dict):
         )
         if backend == "rust":
             return lambda: portfolio.simulate(n_simulations=spec["n_simulations"])
-        return lambda: portfolio._fallback_simulate_portfolio(
-            n_simulations=spec["n_simulations"]
+        # Exercise the NumPy adapter directly (single-period copula default), so the
+        # benchmark measures the fallback compute, not the dispatch.
+        return lambda: portfolio._simulate_portfolio_numpy(
+            n_simulations=spec["n_simulations"],
+            n_periods=1,
+            period_length=1.0,
+            default_timing="copula",
+            factor_phi=0.0,
+            barriers=None,
+            store_interim=False,
+            output_path=None,
+            batch_size=None,
         )
 
     raise ValueError(f"unknown test {test!r}")

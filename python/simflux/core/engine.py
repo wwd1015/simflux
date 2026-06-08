@@ -65,9 +65,8 @@ class SimulationEngine:
         _validate_sim_dims(n_paths, n_steps, T)
         self._check_memory(n_paths * (n_steps + 1))
 
-        if Backend.is_available():
-            return self._rust_simulate_gbm(mu, sigma, s0, n_paths, n_steps, T)
-        return self._numpy_simulate_gbm(mu, sigma, s0, n_paths, n_steps, T)
+        run = Backend.choose(self._rust_simulate_gbm, self._numpy_simulate_gbm)
+        return run(mu, sigma, s0, n_paths, n_steps, T)
 
     def simulate_gbm_correlated(
         self,
@@ -101,13 +100,10 @@ class SimulationEngine:
         _validate_sim_dims(n_paths, n_steps, T)
         self._check_memory(n_paths * n_assets * (n_steps + 1))
 
-        if Backend.is_available():
-            return self._rust_simulate_gbm_correlated(
-                mu, sigma, s0, correlation_matrix, n_paths, n_steps, T
-            )
-        return self._numpy_simulate_gbm_correlated(
-            mu, sigma, s0, correlation_matrix, n_paths, n_steps, T
+        run = Backend.choose(
+            self._rust_simulate_gbm_correlated, self._numpy_simulate_gbm_correlated
         )
+        return run(mu, sigma, s0, correlation_matrix, n_paths, n_steps, T)
 
     # ------------------------------------------------------------------
     # Time-varying GBM
@@ -130,11 +126,11 @@ class SimulationEngine:
         _validate_sim_dims(n_paths, n_steps, T)
         self._check_memory(n_paths * (n_steps + 1))
 
-        if Backend.is_available():
-            return self._rust_simulate_gbm_time_varying(
-                mu_times, mu_values, sigma_times, sigma_values, s0, n_paths, n_steps, T
-            )
-        return self._numpy_simulate_gbm_time_varying(
+        run = Backend.choose(
+            self._rust_simulate_gbm_time_varying,
+            self._numpy_simulate_gbm_time_varying,
+        )
+        return run(
             mu_times, mu_values, sigma_times, sigma_values, s0, n_paths, n_steps, T
         )
 
@@ -158,19 +154,11 @@ class SimulationEngine:
         _validate_sim_dims(n_paths, n_steps, T)
         self._check_memory(n_paths * n_assets * (n_steps + 1))
 
-        if Backend.is_available():
-            return self._rust_simulate_gbm_time_varying_correlated(
-                mu_times,
-                mu_values,
-                sigma_times,
-                sigma_values,
-                s0,
-                correlation_matrix,
-                n_paths,
-                n_steps,
-                T,
-            )
-        return self._numpy_simulate_gbm_time_varying_correlated(
+        run = Backend.choose(
+            self._rust_simulate_gbm_time_varying_correlated,
+            self._numpy_simulate_gbm_time_varying_correlated,
+        )
+        return run(
             mu_times,
             mu_values,
             sigma_times,
