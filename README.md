@@ -143,99 +143,92 @@ tv_gbm_flat = sf.TimeVaryingGBM(
 
 ### Portfolio Loss Simulation
 
-Simulate credit portfolio losses using a two-factor Merton framework. Each asset can default based on its probability of default (PD), with losses determined by loss given default (LGD).
+A **portfolio is a list of obligors** (`AssetData`). One Monte Carlo *path* draws
+the shared sector factors once, then each obligor's idiosyncratic factor, so
+defaults are decided *jointly* within a path — correlated through the sectors
+obligors share. `n_simulations` is the number of such independent paths; each path
+simulates the whole portfolio over `n_periods` steps. **Single-period is just
+`n_periods=1`** (the default); the same call generalizes to multiple periods.
 
 ```python
-# Quick start with sample portfolio
-portfolio = sf.CreditPortfolio.create_sample_portfolio(
-    n_assets_per_sector=100,
-    sectors=['Technology', 'Finance', 'Healthcare'],
-    intra_sector_correlations=0.4,   # how correlated assets are within a sector
-    inter_sector_correlation=0.2,     # how correlated sectors are with each other
-    systematic_lgd_correlation=0.3,   # how loss severity correlates with market stress
-)
+import simflux as sf
 
-# Or build from asset data
+# 1) Build the obligors explicitly...
+assets = [
+    sf.AssetData(
+        asset_id=i,
+        sector_id=0,
+        pd=0.02,                 # 1-period probability of default
+        lgd_mean=0.6,            # mean loss given default
+        lgd_std=0.15,            # LGD dispersion (Beta)
+        exposure=1_000_000,      # exposure at default
+        sector_name="Technology",
+    )
+    for i in range(100)
+]
+
+# ...or from a DataFrame with columns asset_id, sector, pd, lgd_mean, lgd_std, exposure:
+#   assets = sf.AssetData.from_dataframe(df)
+# ...or skip construction and use a generated sample portfolio:
+#   portfolio = sf.CreditPortfolio.create_sample_portfolio(
+#       n_assets_per_sector=100, sectors=["Technology", "Finance", "Healthcare"],
+#       intra_sector_correlations=0.4, inter_sector_correlation=0.2)
+
 portfolio = sf.CreditPortfolio(
-    assets=asset_data,  # List[AssetData] or DataFrame with pd, lgd_mean, lgd_std, exposure, sector
-    intra_sector_correlations={'Technology': 0.5, 'Finance': 0.4},
-    sector_correlation_matrix=sector_corr_matrix,  # np.ndarray, optional
-    systematic_lgd_correlation=0.3,
+    assets,
+    intra_sector_correlations=0.4,    # share of an obligor's variance from its sector factor
+    systematic_lgd_correlation=0.3,   # wrong-way risk: positive => LGD rises in downturns
+    # sector_correlation_matrix=...,  # np.ndarray, optional; defaults to identity
 )
 
-# Run 100k Monte Carlo scenarios
-results = portfolio.simulate(n_simulations=100000)
-print(results['portfolio_statistics'])  # mean loss, VaR, expected shortfall, etc.
-
-# The result keys are identical whether the Rust backend or the NumPy fallback ran:
-#   portfolio_statistics, sector_statistics, n_trials, n_assets, n_sectors,
-#   sector_names, n_periods, period_length, time_horizon
-# ('analyzer' is added only when interim results are stored — see below)
-
-# With interim results saved to disk for detailed analysis.
-# StorageConfig exposes the fields the writer honors: store_interim, output_path, batch_size.
-storage_config = sf.StorageConfig(
-    store_interim=True,
-    output_path="simulation_results.parquet",
-)
-results = portfolio.simulate(
-    n_simulations=100000,
-    storage_config=storage_config
-)
-
-# Analyze results
-analyzer = sf.ParquetResultsAnalyzer("simulation_results.parquet")
-high_loss_trials = analyzer.query_high_loss_trials(percentile=99)
-sector_analysis = analyzer.analyze_by_sector()
+results = portfolio.simulate(n_simulations=100_000)   # single period (n_periods=1)
+print(results["portfolio_statistics"])  # mean, var_95/99/999, expected_shortfall, ...
 ```
 
-### Multi-Period Portfolio Simulation
-
-A **portfolio is a list of obligors** (`AssetData`). One simulation path draws the
-shared systematic (sector) factors once, then each obligor's idiosyncratic factor,
-so every asset's default is decided *jointly* within that path — correlated through
-the sectors they share. `n_simulations` is the number of such independent paths;
-each path simulates the whole portfolio over `n_periods` steps.
+**Multiple periods.** Give each obligor a cumulative-PD term structure and step
+through time — same method, just `n_periods > 1`:
 
 ```python
-# Cumulative PD by the end of each quarter — one value per period, ending at 0.06.
-# It must be at least as long as n_periods (here: 8 quarters = 2 years).
+# Cumulative PD by the end of each quarter (>= n_periods long), ending at the horizon PD.
 tech_curve = [0.008, 0.016, 0.024, 0.031, 0.038, 0.045, 0.052, 0.060]
-
-# Build the obligors, then assemble them into a portfolio.
 assets = [
     sf.AssetData(
         asset_id=i, sector_id=0, pd=0.06,
         lgd_mean=0.5, lgd_std=0.1, exposure=1_000_000,
-        sector_name="Tech",
-        pd_term_structure=tech_curve,
+        sector_name="Tech", pd_term_structure=tech_curve,
     )
     for i in range(50)
 ]
 portfolio = sf.CreditPortfolio(assets, intra_sector_correlations=0.2)
 
-# Each of the 100k paths simulates all 50 obligors jointly over 8 quarters.
 results = portfolio.simulate(
     n_simulations=100_000,
-    n_periods=8,            # 8 quarters
-    period_length=0.25,     # each quarter = 0.25 years
-    default_timing="copula",
+    n_periods=8,              # 8 quarters
+    period_length=0.25,       # each quarter = 0.25 years
+    default_timing="copula",  # or "frailty"; the two coincide at n_periods=1
 )
-
-# `results` is a summary dict: portfolio- and sector-level loss statistics.
 print(results["portfolio_statistics"]["var_99"])
-
-# Per-default detail (which obligor defaulted, in which period, its
-# time_to_default and the factors at default) is written to Parquet when you pass
-# StorageConfig(store_interim=True, output_path=...); read it back with
-# ParquetResultsAnalyzer.
 ```
 
-A `pd_term_structure` **longer** than `n_periods` is fine — it runs a sub-horizon
-(the first `n_periods` points are used). A structure **shorter** than `n_periods`
-raises `RuntimeError`: the later periods would have no cumulative PD. When no
-`pd_term_structure` is provided, the flat `pd` is spread across periods assuming a
-constant hazard rate.
+The result keys are identical whether the Rust backend or the NumPy fallback ran:
+`portfolio_statistics`, `sector_statistics`, `n_trials`, `n_assets`, `n_sectors`,
+`sector_names`, `n_periods`, `period_length`, `time_horizon` (`analyzer` is added
+only when interim results are stored — see below). A `pd_term_structure` **longer**
+than `n_periods` runs a sub-horizon (the first `n_periods` points are used); a
+structure **shorter** than `n_periods` raises `RuntimeError`; with no term
+structure the flat `pd` is spread across periods at a constant hazard rate.
+
+**Per-default detail.** Store interim results to Parquet to recover which obligor
+defaulted, in which period, its `time_to_default`, and the factors at default:
+
+```python
+storage = sf.StorageConfig(store_interim=True, output_path="results.parquet")
+results = portfolio.simulate(n_simulations=100_000, storage_config=storage)
+
+analyzer = sf.ParquetResultsAnalyzer("results.parquet")
+high_loss_trials = analyzer.query_high_loss_trials(percentile=99)
+sector_analysis = analyzer.analyze_by_sector()
+```
 
 ## Methodology
 
