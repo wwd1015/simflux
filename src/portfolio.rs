@@ -44,12 +44,18 @@ pub struct AssetData {
     /// used and a constant hazard is assumed across all periods.
     #[pyo3(get, set)]
     pub pd_term_structure: Option<Vec<f64>>,
+    /// Per-obligor intra-sector correlation (the share of this obligor's latent
+    /// variance carried by its sector factor).  When `None` the sector-level
+    /// value from `PortfolioConfig.intra_sector_correlations` is used, so
+    /// obligors in a sector may have heterogeneous loadings.
+    #[pyo3(get, set)]
+    pub intra_sector_correlation: Option<f64>,
 }
 
 #[pymethods]
 impl AssetData {
     #[new]
-    #[pyo3(signature = (asset_id, sector_id, pd, lgd_mean, lgd_std, exposure, sector_name, pd_term_structure=None))]
+    #[pyo3(signature = (asset_id, sector_id, pd, lgd_mean, lgd_std, exposure, sector_name, pd_term_structure=None, intra_sector_correlation=None))]
     pub fn new(
         asset_id: u32,
         sector_id: u32,
@@ -59,6 +65,7 @@ impl AssetData {
         exposure: f64,
         sector_name: String,
         pd_term_structure: Option<Vec<f64>>,
+        intra_sector_correlation: Option<f64>,
     ) -> PyResult<Self> {
         if pd < 0.0 || pd > 1.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -109,6 +116,14 @@ impl AssetData {
             }
         }
 
+        if let Some(rho) = intra_sector_correlation {
+            if !(0.0..=1.0).contains(&rho) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "intra_sector_correlation must be between 0 and 1",
+                ));
+            }
+        }
+
         Ok(AssetData {
             asset_id,
             sector_id,
@@ -118,6 +133,7 @@ impl AssetData {
             exposure,
             sector_name,
             pd_term_structure,
+            intra_sector_correlation,
         })
     }
 
@@ -588,7 +604,9 @@ fn simulate_single_trial(
             let sector_index = asset.sector_id as usize;
             let sector_factor = factors.get_sector_factor(sector_index);
 
-            let intra_corr = correlation_structure.intra_sector_correlations[sector_index];
+            let intra_corr = asset
+                .intra_sector_correlation
+                .unwrap_or(correlation_structure.intra_sector_correlations[sector_index]);
             let sector_loading = intra_corr.sqrt();
             let idio_loading = (1.0 - intra_corr).max(0.0).sqrt();
             let idio = sample_standard_normal(&mut rng);
@@ -637,7 +655,9 @@ fn simulate_single_trial(
                 let sector_index = asset.sector_id as usize;
                 let sector_factor = factors.get_sector_factor(sector_index);
 
-                let intra_corr = correlation_structure.intra_sector_correlations[sector_index];
+                let intra_corr = asset
+                    .intra_sector_correlation
+                    .unwrap_or(correlation_structure.intra_sector_correlations[sector_index]);
                 let sector_loading = intra_corr.sqrt();
                 let idio_loading = (1.0 - intra_corr).max(0.0).sqrt();
                 let idio = sample_standard_normal(&mut rng);
@@ -805,8 +825,18 @@ mod tests {
 
     #[test]
     fn test_asset_data_creation() {
-        let asset =
-            AssetData::new(1, 0, 0.05, 0.6, 0.2, 1e6, "Technology".to_string(), None).unwrap();
+        let asset = AssetData::new(
+            1,
+            0,
+            0.05,
+            0.6,
+            0.2,
+            1e6,
+            "Technology".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(asset.asset_id, 1);
         assert!(asset.get_default_threshold() < 0.0);
     }
@@ -823,6 +853,7 @@ mod tests {
             1e6,
             "Tech".to_string(),
             Some(ts.clone()),
+            None,
         )
         .unwrap();
         assert_eq!(asset.pd_term_structure.as_ref().unwrap().len(), 4);
@@ -839,6 +870,7 @@ mod tests {
             exposure: 1e6,
             sector_name: "A".into(),
             pd_term_structure: None,
+            intra_sector_correlation: None,
         };
         // Single period: conditional PD == flat PD
         assert!((get_conditional_pd(&asset, 0, 1) - 0.10).abs() < 1e-12);
@@ -858,6 +890,7 @@ mod tests {
             exposure: 1e6,
             sector_name: "A".into(),
             pd_term_structure: Some(vec![0.02, 0.05, 0.08, 0.10]),
+            intra_sector_correlation: None,
         };
         // Period 0: forward PD = cum[0] = 0.02
         assert!((get_conditional_pd(&asset, 0, 4) - 0.02).abs() < 1e-12);

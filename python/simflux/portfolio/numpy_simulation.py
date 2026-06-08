@@ -39,7 +39,7 @@ def simulate_portfolio_numpy(
     *,
     config: SimulationConfig,
     sector_correlation_matrix: np.ndarray,
-    intra_sector_correlations: Sequence[float],
+    asset_intra_correlations: np.ndarray,
     systematic_lgd_correlations: Sequence[float],
     sector_names: Sequence[str],
     asset_sector_ids: np.ndarray,
@@ -109,8 +109,9 @@ def simulate_portfolio_numpy(
     asset_lgd_stds = np.asarray(asset_lgd_stds)
     asset_exposures = np.asarray(asset_exposures)
 
-    intra_corrs = np.asarray(intra_sector_correlations)
-    asset_intra_corrs = intra_corrs[asset_sector_ids]
+    # Per-obligor intra-sector correlation (heterogeneous loadings within a sector
+    # are allowed); already resolved to one value per asset by the caller.
+    asset_intra_corrs = np.asarray(asset_intra_correlations)
     sector_loadings = np.sqrt(asset_intra_corrs)
     idio_loadings = np.sqrt(np.maximum(0.0, 1 - asset_intra_corrs))
 

@@ -256,6 +256,20 @@ class CreditPortfolio(BaseSimulator):
         else:
             raise ValueError("intra_sector_correlations must be float or dict")
 
+        # Per-obligor sector loading rho_i: an asset's own intra_sector_correlation
+        # when set, else its sector's value. This is what both backends actually
+        # load on, so obligors within a sector may have heterogeneous loadings.
+        # The per-sector list above remains the fallback for obligors without an
+        # explicit value (and the value carried on the Rust seam).
+        self.asset_intra_correlations = [
+            (
+                a.intra_sector_correlation
+                if a.intra_sector_correlation is not None
+                else self.intra_sector_correlations[a.sector_id]
+            )
+            for a in self.assets
+        ]
+
         # Resolve LGD-systematic correlation to one value per sector.  Must run
         # after intra_sector_correlations, because "match_intra" reads them.
         self.systematic_lgd_correlations = self._resolve_systematic_lgd_correlations(
@@ -358,8 +372,14 @@ class CreditPortfolio(BaseSimulator):
             raise ValueError("Some sectors have no assets")
 
     def _infer_intra_correlations_from_assets(self) -> Optional[List[float]]:
-        """Derive intra-sector correlations from asset metadata when available."""
+        """Derive a per-sector *representative* intra-correlation from asset metadata.
 
+        Used only as the sector-level fallback when no ``intra_sector_correlations``
+        argument is given; the true per-obligor loadings live in
+        ``asset_intra_correlations``, so heterogeneity within a sector is allowed.
+        Returns the per-sector mean of the assets that carry a value (a homogeneous
+        sector collapses to that single value); ``None`` if no asset carries one.
+        """
         sector_values: Dict[str, List[float]] = {}
         for asset in self.assets:
             if asset.intra_sector_correlation is not None:
@@ -373,27 +393,10 @@ class CreditPortfolio(BaseSimulator):
         inferred: List[float] = []
         for sector in self.sector_names:
             values = sector_values.get(sector)
-            if not values:
-                raise ValueError(
-                    f"No intra-sector correlation provided for sector '{sector}'"
-                )
-            inferred.append(
-                self._resolve_unique_value(values, f"intra correlation ({sector})")
-            )
+            # A sector whose assets carry no value falls back to the 0.4 default.
+            inferred.append(float(np.mean(values)) if values else 0.4)
 
         return inferred
-
-    @staticmethod
-    def _resolve_unique_value(values: List[float], label: str) -> float:
-        """Ensure a set of values collapses to a single correlation."""
-
-        base = float(values[0])
-        for value in values[1:]:
-            if abs(value - base) > 1e-6:
-                raise ValueError(f"Inconsistent values supplied for {label}: {values}")
-        if not -1 <= base <= 1:
-            raise ValueError(f"{label} must lie between -1 and 1, got {base}")
-        return base
 
     def _prepare_sector_correlation_matrix(
         self, matrix: Optional[Union[np.ndarray, List[List[float]]]]
@@ -540,9 +543,9 @@ class CreditPortfolio(BaseSimulator):
             cum_matrix = np.stack(
                 [self._get_cumulative_pds(k, n_periods) for k in range(n_periods)]
             )
-            asset_rhos = np.array(self.intra_sector_correlations)[
-                np.array([a.sector_id for a in self.assets])
-            ]
+            # Per-obligor rho_i (heterogeneous loadings allowed), so the frailty
+            # barrier is calibrated with the same loading each backend simulates on.
+            asset_rhos = np.array(self.asset_intra_correlations)
             barriers = barrier_matrix(cum_matrix, asset_rhos, factor_phi)
 
         store_interim = storage_config.store_interim if storage_config else False
@@ -603,6 +606,7 @@ class CreditPortfolio(BaseSimulator):
             exposure=asset.exposure,
             sector_name=asset.sector_name,
             pd_term_structure=asset.pd_term_structure,
+            intra_sector_correlation=asset.intra_sector_correlation,
         )
 
     # ------------------------------------------------------------------
@@ -685,7 +689,7 @@ class CreditPortfolio(BaseSimulator):
         return simulate_portfolio_numpy(
             config=self.config,
             sector_correlation_matrix=self.sector_correlation_matrix,
-            intra_sector_correlations=self.intra_sector_correlations,
+            asset_intra_correlations=np.array(self.asset_intra_correlations),
             systematic_lgd_correlations=self.systematic_lgd_correlations,
             sector_names=self.sector_names,
             asset_sector_ids=np.array([a.sector_id for a in self.assets]),
