@@ -26,6 +26,11 @@ jobs:
         cargo fmt --all -- --check
         cargo clippy -- -D warnings
 
+    - name: Rust unit tests
+      # --no-default-features drops the pyo3 extension-module feature so the test
+      # binary links libpython (setup-python provides it on PATH).
+      run: cargo test --no-default-features
+
     - name: Python lint
       run: |
         pip install black ruff mypy

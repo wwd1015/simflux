@@ -873,6 +873,7 @@ mod tests {
             "Technology".to_string(),
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(asset.asset_id, 1);
@@ -891,6 +892,7 @@ mod tests {
             1e6,
             "Tech".to_string(),
             Some(ts.clone()),
+            None,
             None,
         )
         .unwrap();
