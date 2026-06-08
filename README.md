@@ -147,7 +147,7 @@ Simulate credit portfolio losses using a two-factor Merton framework. Each asset
 
 ```python
 # Quick start with sample portfolio
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+portfolio = sf.CreditPortfolio.create_sample_portfolio(
     n_assets_per_sector=100,
     sectors=['Technology', 'Finance', 'Healthcare'],
     intra_sector_correlations=0.4,   # how correlated assets are within a sector
@@ -156,7 +156,7 @@ portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
 )
 
 # Or build from asset data
-portfolio = sf.TwoFactorPortfolio(
+portfolio = sf.CreditPortfolio(
     assets=asset_data,  # List[AssetData] or DataFrame with pd, lgd_mean, lgd_std, exposure, sector
     intra_sector_correlations={'Technology': 0.5, 'Finance': 0.4},
     sector_correlation_matrix=sector_corr_matrix,  # np.ndarray, optional
@@ -212,7 +212,7 @@ assets = [
     )
     for i in range(50)
 ]
-portfolio = sf.TwoFactorPortfolio(assets, intra_sector_correlations=0.2)
+portfolio = sf.CreditPortfolio(assets, intra_sector_correlations=0.2)
 
 # Each of the 100k paths simulates all 50 obligors jointly over 8 quarters.
 results = portfolio.simulate(

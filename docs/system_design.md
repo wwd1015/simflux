@@ -13,7 +13,7 @@ SimFlux uses a hybrid Python/Rust architecture:
 │                  User Code                       │
 ├─────────────────────────────────────────────────┤
 │  Public API: GBM, CorrelatedGBM, TimeVaryingGBM │
-│              TwoFactorPortfolio                  │
+│              CreditPortfolio                  │
 ├─────────────────────────────────────────────────┤
 │  Config: SimulationConfig, StorageConfig, AssetData  │
 ├────────────────────┬────────────────────────────┤
@@ -60,7 +60,7 @@ SimFlux uses a hybrid Python/Rust architecture:
 ### portfolio/two_factor_model.py
 - `AssetData`: Credit asset parameters (PD, LGD, exposure, sector)
 - `PortfolioResult`: `TypedDict` documenting the result contract **both backends honor** — same key set (`portfolio_statistics`, `sector_statistics`, `n_trials`, plus metadata); `analyzer` only when interim results are stored
-- `TwoFactorPortfolio`: Merton two-factor credit model
+- `CreditPortfolio`: Merton two-factor credit model
   - Systematic factor = sector loading × sector factor + idio loading × noise
   - Default if asset value ≤ Φ⁻¹(PD)
   - LGD via correlated Beta distribution
@@ -86,7 +86,7 @@ SimFlux uses a hybrid Python/Rust architecture:
 ```python
 from simflux.core.backend import Backend
 
-# Centralized check — used by SimulationEngine, TwoFactorPortfolio, etc.
+# Centralized check — used by SimulationEngine, CreditPortfolio, etc.
 if Backend.is_available():
     _rust = Backend.get_rust()
     # Calls _rust.simulate_gbm(), _rust.simulate_gbm_tv(), etc.

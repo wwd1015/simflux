@@ -31,7 +31,7 @@ def main():
     print()
 
     # Create portfolio
-    portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+    portfolio = sf.CreditPortfolio.create_sample_portfolio(
         n_assets_per_sector=[30, 25, 20],
         sectors=['Technology', 'Finance', 'Healthcare'],
         sector_correlation_matrix=sector_corr,

@@ -155,7 +155,7 @@ class AssetData:
 
 
 class PortfolioResult(TypedDict):
-    """Result contract returned by :meth:`TwoFactorPortfolio.simulate`.
+    """Result contract returned by :meth:`CreditPortfolio.simulate`.
 
     Both the Rust backend and the NumPy fallback populate exactly these keys, so
     a caller never has to know which backend ran.  ``analyzer`` is the only
@@ -178,7 +178,7 @@ class PortfolioResult(TypedDict):
     analyzer: NotRequired[ParquetResultsAnalyzer]
 
 
-class TwoFactorPortfolio(BaseSimulator):
+class CreditPortfolio(BaseSimulator):
     """
     Two-factor portfolio loss simulation model.
 
@@ -801,7 +801,7 @@ class TwoFactorPortfolio(BaseSimulator):
         n_assets_per_sector: Union[int, List[int]] = 100,
         sectors: Optional[List[str]] = None,
         **kwargs: Any,
-    ) -> "TwoFactorPortfolio":
+    ) -> "CreditPortfolio":
         """
         Create a sample portfolio for testing.
 
@@ -812,7 +812,7 @@ class TwoFactorPortfolio(BaseSimulator):
         sectors : List[str], optional
             Sector names. Default=['Technology', 'Finance', 'Healthcare']
         **kwargs
-            Additional arguments for TwoFactorPortfolio constructor.
+            Additional arguments for CreditPortfolio constructor.
             Supports ``inter_sector_correlation`` (float) to build a uniform
             sector correlation matrix when ``sector_correlation_matrix`` is
             not provided.
@@ -879,3 +879,23 @@ class TwoFactorPortfolio(BaseSimulator):
             kwargs["sector_correlation_matrix"] = matrix
 
         return cls(assets, **kwargs)
+
+
+class TwoFactorPortfolio(CreditPortfolio):
+    """Deprecated alias for :class:`CreditPortfolio`.
+
+    Renamed because the model is a multi-sector, single-systematic-factor Gaussian
+    copula (the "two factors" were systematic + idiosyncratic per obligor, which
+    read as a factor *count* and caused confusion).  Kept as a thin subclass so
+    existing code keeps working; it emits a ``DeprecationWarning`` and will be
+    removed in a future release.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        warnings.warn(
+            "TwoFactorPortfolio has been renamed to CreditPortfolio and will be "
+            "removed in a future release; update your imports.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)

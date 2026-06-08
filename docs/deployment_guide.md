@@ -232,7 +232,7 @@ def test_simflux_installation():
         print(f"✅ GBM simulation working: {paths.shape}")
         
         # Test portfolio
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(10)
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(10)
         results = portfolio.simulate(n_simulations=100)
         print(f"✅ Portfolio simulation working")
         

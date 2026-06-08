@@ -11,7 +11,7 @@ from simflux.core.backend import Backend
 @pytest.fixture
 def sample_portfolio():
     """Small portfolio for fast storage tests."""
-    return sf.TwoFactorPortfolio.create_sample_portfolio(
+    return sf.CreditPortfolio.create_sample_portfolio(
         n_assets_per_sector=[5, 5],
         sectors=["Tech", "Finance"],
         inter_sector_correlation=0.2,
@@ -29,7 +29,7 @@ def default_heavy_portfolio():
         )
         for i in range(10)
     ]
-    return sf.TwoFactorPortfolio(
+    return sf.CreditPortfolio(
         assets=assets,
         intra_sector_correlations=0.3,
         sector_correlation_matrix=[[1.0, 0.2], [0.2, 1.0]],
@@ -263,7 +263,7 @@ class TestSparseInterimStore:
         assets = [sf.AssetData(i, 0, 0.5, 0.5, 0.1, 1e6, "Loud") for i in range(5)] + [
             sf.AssetData(5 + i, 1, 1e-9, 0.5, 0.1, 1e6, "Quiet") for i in range(5)
         ]
-        port = sf.TwoFactorPortfolio(
+        port = sf.CreditPortfolio(
             assets=assets,
             intra_sector_correlations=0.2,
             sector_correlation_matrix=[[1.0, 0.1], [0.1, 1.0]],
@@ -289,7 +289,7 @@ class TestSparseInterimStore:
         # Negligible PD: almost surely zero defaults, but the file must still be a
         # valid, metadata-bearing Parquet the analyzer can read and reindex.
         assets = [sf.AssetData(i, 0, 0.0001, 0.5, 0.1, 1e6, "S") for i in range(4)]
-        port = sf.TwoFactorPortfolio(
+        port = sf.CreditPortfolio(
             assets=assets,
             intra_sector_correlations=0.2,
             sector_correlation_matrix=[[1.0]],

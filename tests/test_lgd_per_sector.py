@@ -26,27 +26,27 @@ def _assets(n=20):
 
 
 def test_scalar_broadcasts_to_every_sector():
-    p = sf.TwoFactorPortfolio(_assets(), systematic_lgd_correlation=0.3)
+    p = sf.CreditPortfolio(_assets(), systematic_lgd_correlation=0.3)
     assert p.systematic_lgd_correlations == [0.3, 0.3]
     # Backward-compatible scalar view stays scalar when uniform.
     assert p.systematic_lgd_correlation == 0.3
 
 
 def test_list_is_per_sector_in_sorted_order():
-    p = sf.TwoFactorPortfolio(_assets(), systematic_lgd_correlation=[0.2, 0.5])
+    p = sf.CreditPortfolio(_assets(), systematic_lgd_correlation=[0.2, 0.5])
     assert p.systematic_lgd_correlations == [0.2, 0.5]
     # Non-uniform => the compat view returns the full list.
     assert p.systematic_lgd_correlation == [0.2, 0.5]
 
 
 def test_dict_maps_by_name_and_defaults_missing():
-    p = sf.TwoFactorPortfolio(_assets(), systematic_lgd_correlation={"B": 0.6})
+    p = sf.CreditPortfolio(_assets(), systematic_lgd_correlation={"B": 0.6})
     # "A" missing -> default 0.3; "B" -> 0.6 (sorted order [A, B]).
     assert p.systematic_lgd_correlations == [0.3, 0.6]
 
 
 def test_match_intra_sets_sqrt_of_intra_per_sector():
-    p = sf.TwoFactorPortfolio(
+    p = sf.CreditPortfolio(
         _assets(),
         intra_sector_correlations={"A": 0.36, "B": 0.16},
         systematic_lgd_correlation="match_intra",
@@ -57,27 +57,27 @@ def test_match_intra_sets_sqrt_of_intra_per_sector():
 
 def test_list_wrong_length_rejected():
     with pytest.raises(ValueError, match="one value per sector"):
-        sf.TwoFactorPortfolio(_assets(), systematic_lgd_correlation=[0.3])
+        sf.CreditPortfolio(_assets(), systematic_lgd_correlation=[0.3])
 
 
 def test_per_sector_value_out_of_range_rejected():
     with pytest.raises(ValueError, match="systematic_lgd_correlation must be between -1 and 1"):
-        sf.TwoFactorPortfolio(_assets(), systematic_lgd_correlation=[0.3, 1.5])
+        sf.CreditPortfolio(_assets(), systematic_lgd_correlation=[0.3, 1.5])
 
 
 def test_unknown_string_rejected():
     with pytest.raises(ValueError, match="match_intra"):
-        sf.TwoFactorPortfolio(_assets(), systematic_lgd_correlation="match_pd")
+        sf.CreditPortfolio(_assets(), systematic_lgd_correlation="match_pd")
 
 
 def test_summary_reports_per_sector_lgd():
-    p = sf.TwoFactorPortfolio(_assets(), systematic_lgd_correlation={"A": 0.1, "B": 0.6})
+    p = sf.CreditPortfolio(_assets(), systematic_lgd_correlation={"A": 0.1, "B": 0.6})
     structure = p.get_portfolio_summary()["correlation_structure"]
     assert structure["systematic_lgd"] == {"A": 0.1, "B": 0.6}
 
 
 def _mean_loss(rho_lgd, force_numpy):
-    p = sf.TwoFactorPortfolio(
+    p = sf.CreditPortfolio(
         _assets(), intra_sector_correlations=0.5,
         systematic_lgd_correlation=rho_lgd, config=SimulationConfig(seed=7),
     )

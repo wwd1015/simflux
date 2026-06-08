@@ -41,7 +41,7 @@ def _homogeneous(pd, n=200, intra=0.2, rho_lgd=0.0, lgd_mean=0.5, seed=1, ts=Non
         sf.AssetData(i, 0, pd, lgd_mean, 0.1, EXPOSURE, "A", pd_term_structure=ts)
         for i in range(n)
     ]
-    return sf.TwoFactorPortfolio(
+    return sf.CreditPortfolio(
         assets=assets, intra_sector_correlations=intra,
         systematic_lgd_correlation=rho_lgd, sector_correlation_matrix=[[1.0]],
         config=SimulationConfig(seed=seed),
@@ -91,7 +91,7 @@ def test_var_increases_with_cross_sector_correlation():
     ]
 
     def run(off_diag):
-        port = sf.TwoFactorPortfolio(
+        port = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.3,
             sector_correlation_matrix=[[1.0, off_diag], [off_diag, 1.0]],
             config=SimulationConfig(seed=6),

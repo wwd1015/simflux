@@ -81,7 +81,7 @@ class TestNumpyFallbackLgdRegression:
         lgd_mean = 0.2
         n, pd, exposure = 50, 0.10, 1_000_000.0
         assets = [sf.AssetData(i, 0, pd, lgd_mean, 0.08, exposure, "A") for i in range(n)]
-        port = sf.TwoFactorPortfolio(
+        port = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.1,
             systematic_lgd_correlation=0.0,  # E[LGD|default] == lgd_mean
             config=SimulationConfig(seed=11),

@@ -22,7 +22,7 @@ from simflux.core.backend import Backend
 from simflux.core.base import SimulationConfig
 
 
-def _portfolio(rho_lgd: float, seed: int) -> sf.TwoFactorPortfolio:
+def _portfolio(rho_lgd: float, seed: int) -> sf.CreditPortfolio:
     # One highly-correlated sector maximises the clustering of defaults with the
     # systematic factor, so the conditioning effect on LGD is large and the test
     # sits well above the Monte Carlo noise floor.
@@ -30,7 +30,7 @@ def _portfolio(rho_lgd: float, seed: int) -> sf.TwoFactorPortfolio:
         sf.AssetData(i, 0, 0.08, 0.5, 0.2, 1_000_000, "A")
         for i in range(50)
     ]
-    return sf.TwoFactorPortfolio(
+    return sf.CreditPortfolio(
         assets=assets,
         intra_sector_correlations=0.6,
         systematic_lgd_correlation=rho_lgd,

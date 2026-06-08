@@ -36,7 +36,7 @@ class TestStorageIntegration:
             output_path = os.path.join(temp_dir, "portfolio_results.parquet")
 
             # Create portfolio
-            portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+            portfolio = sf.CreditPortfolio.create_sample_portfolio(
                 n_assets_per_sector=[10, 8],
                 sectors=['Tech', 'Finance'],
                 inter_sector_correlation=0.2
@@ -111,7 +111,7 @@ class TestStorageIntegration:
         pytest.importorskip("psutil")
 
         # Create a portfolio simulation without storage
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=[5, 5],
             sectors=['A', 'B'],
             inter_sector_correlation=0.1
@@ -170,7 +170,7 @@ class TestStorageIntegration:
         config = sf.StorageConfig(store_interim=True, batch_size=4096)
         assert config.batch_size == 4096
 
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=[3, 3],
             sectors=['X', 'Y'],
             inter_sector_correlation=0.1

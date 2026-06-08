@@ -99,8 +99,8 @@ class TestAssetData:
         assert assets[1].sector_id == 0
 
 
-class TestTwoFactorPortfolio:
-    """Test TwoFactorPortfolio functionality."""
+class TestCreditPortfolio:
+    """Test CreditPortfolio functionality."""
 
     def create_sample_assets(self):
         """Helper to create sample assets."""
@@ -113,11 +113,11 @@ class TestTwoFactorPortfolio:
 
     @patch.object(sf.core.backend.Backend, 'is_available', return_value=True)
     def test_portfolio_initialization(self, mock_avail):
-        """Test TwoFactorPortfolio initialization."""
+        """Test CreditPortfolio initialization."""
         assets = self.create_sample_assets()
 
         matrix = np.array([[1.0, 0.2], [0.2, 1.0]])
-        portfolio = sf.TwoFactorPortfolio(
+        portfolio = sf.CreditPortfolio(
             assets=assets,
             intra_sector_correlations=0.4,
             sector_correlation_matrix=matrix,
@@ -135,7 +135,7 @@ class TestTwoFactorPortfolio:
         """Test portfolio with dictionary of intra-sector correlations."""
         assets = self.create_sample_assets()
 
-        portfolio = sf.TwoFactorPortfolio(
+        portfolio = sf.CreditPortfolio(
             assets=assets,
             intra_sector_correlations={'Tech': 0.35, 'Finance': 0.45}
         )
@@ -154,7 +154,7 @@ class TestTwoFactorPortfolio:
             'exposure': [1000000, 500000, 750000]
         })
 
-        portfolio = sf.TwoFactorPortfolio(assets=df)
+        portfolio = sf.CreditPortfolio(assets=df)
 
         assert len(portfolio.assets) == 3
         assert len(portfolio.sector_names) == 2
@@ -179,7 +179,7 @@ class TestTwoFactorPortfolio:
             [0.20, 0.10, 1.0],
         ])
 
-        portfolio = sf.TwoFactorPortfolio(
+        portfolio = sf.CreditPortfolio(
             assets=df,
             sector_correlation_matrix=sector_matrix,
         )
@@ -199,18 +199,18 @@ class TestTwoFactorPortfolio:
         assets = self.create_sample_assets()
 
         with pytest.raises(ValueError, match="sector_correlation_matrix values must be between -1 and 1"):
-            sf.TwoFactorPortfolio(assets=assets, sector_correlation_matrix=[[1.0, 1.5], [1.5, 1.0]])
+            sf.CreditPortfolio(assets=assets, sector_correlation_matrix=[[1.0, 1.5], [1.5, 1.0]])
 
         with pytest.raises(ValueError, match="systematic_lgd_correlation must be between -1 and 1"):
-            sf.TwoFactorPortfolio(assets=assets, systematic_lgd_correlation=-1.5)
+            sf.CreditPortfolio(assets=assets, systematic_lgd_correlation=-1.5)
 
         with pytest.raises(ValueError, match="All intra_sector_correlations must be between 0 and 1"):
-            sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=1.2)
+            sf.CreditPortfolio(assets=assets, intra_sector_correlations=1.2)
 
     def test_portfolio_empty_assets(self):
         """Test portfolio with no assets."""
         with pytest.raises(ValueError, match="No assets provided"):
-            sf.TwoFactorPortfolio(assets=[])
+            sf.CreditPortfolio(assets=[])
 
     @patch.object(sf.core.backend.Backend, 'is_available', return_value=True)
     @patch.object(sf.core.backend.Backend, 'get_rust')
@@ -240,7 +240,7 @@ class TestTwoFactorPortfolio:
         mock_rust.simulate_portfolio.return_value = mock_results
 
         assets = self.create_sample_assets()
-        portfolio = sf.TwoFactorPortfolio(assets=assets)
+        portfolio = sf.CreditPortfolio(assets=assets)
 
         results = portfolio.simulate(n_simulations=10000)
 
@@ -256,7 +256,7 @@ class TestTwoFactorPortfolio:
     def test_portfolio_simulate_invalid_inputs(self):
         """Test portfolio simulation with invalid inputs."""
         assets = self.create_sample_assets()
-        portfolio = sf.TwoFactorPortfolio(assets=assets)
+        portfolio = sf.CreditPortfolio(assets=assets)
 
         with pytest.raises(ValueError, match="n_simulations must be positive"):
             portfolio.simulate(n_simulations=0)
@@ -268,7 +268,7 @@ class TestTwoFactorPortfolio:
     def test_portfolio_summary(self, mock_avail):
         """Test portfolio summary generation."""
         assets = self.create_sample_assets()
-        portfolio = sf.TwoFactorPortfolio(assets=assets)
+        portfolio = sf.CreditPortfolio(assets=assets)
 
         summary = portfolio.get_portfolio_summary()
 
@@ -291,7 +291,7 @@ class TestTwoFactorPortfolio:
     def test_create_sample_portfolio(self):
         """Test sample portfolio creation."""
         matrix = np.array([[1.0, 0.15], [0.15, 1.0]])
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=10,
             sectors=['Tech', 'Finance'],
             sector_correlation_matrix=matrix
@@ -308,7 +308,7 @@ class TestTwoFactorPortfolio:
 
     def test_create_sample_portfolio_different_sizes(self):
         """Test sample portfolio with different sector sizes."""
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=[15, 5, 20],
             sectors=['Tech', 'Finance', 'Healthcare']
         )
@@ -331,7 +331,7 @@ class TestTwoFactorPortfolio:
         assets = self.create_sample_assets()
 
         with pytest.warns(RuntimeWarning):
-            portfolio = sf.TwoFactorPortfolio(assets=assets)
+            portfolio = sf.CreditPortfolio(assets=assets)
 
         results = portfolio.simulate(n_simulations=10)
         assert 'portfolio_statistics' in results
@@ -388,7 +388,7 @@ class TestInterimStorage:
             "Interim storage via the Rust backend is temporarily unavailable"
         )
 
-        portfolio = sf.TwoFactorPortfolio(assets=assets)
+        portfolio = sf.CreditPortfolio(assets=assets)
         storage_config = sf.StorageConfig(store_interim=True, output_path="results.parquet")
 
         with pytest.raises(RuntimeError, match="Interim storage via the Rust backend is not available"):

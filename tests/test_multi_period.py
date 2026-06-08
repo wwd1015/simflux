@@ -25,7 +25,7 @@ class TestSinglePeriodBackwardCompat:
     """n_periods=1 must produce identical semantics to the old API."""
 
     def test_default_args_match_old_behaviour(self):
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=10, sectors=["X", "Y"],
             inter_sector_correlation=0.2,
         )
@@ -36,7 +36,7 @@ class TestSinglePeriodBackwardCompat:
         assert "portfolio_statistics" in results
 
     def test_explicit_single_period(self):
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=5, sectors=["A", "B"],
             inter_sector_correlation=0.1,
         )
@@ -49,7 +49,7 @@ class TestMultiPeriodFlatPD:
 
     def test_quarterly_2_year(self):
         assets = _make_assets(n=10, pd=0.10)  # 10% over full horizon
-        portfolio = sf.TwoFactorPortfolio(
+        portfolio = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.3,
         )
         results = portfolio.simulate(
@@ -63,7 +63,7 @@ class TestMultiPeriodFlatPD:
     def test_more_periods_means_more_defaults(self):
         """With more periods, cumulative default rate should be >= single-period."""
         assets = _make_assets(n=20, pd=0.08)
-        p = sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=0.3)
+        p = sf.CreditPortfolio(assets=assets, intra_sector_correlations=0.3)
 
         r1 = p.simulate(n_simulations=2000, n_periods=1, period_length=1.0)
         r4 = p.simulate(n_simulations=2000, n_periods=4, period_length=0.25)
@@ -82,7 +82,7 @@ class TestMultiPeriodTermStructure:
         # Quarterly cumulative PDs over 1 year
         ts = [0.01, 0.025, 0.04, 0.06]
         assets = _make_assets(n=10, pd=0.06, ts=ts)
-        portfolio = sf.TwoFactorPortfolio(
+        portfolio = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.3,
         )
         results = portfolio.simulate(n_simulations=500, n_periods=4, period_length=0.25)
@@ -100,8 +100,8 @@ class TestMultiPeriodTermStructure:
         assets_front = _make_assets(n=20, pd=0.06, ts=ts_front)
         assets_back = _make_assets(n=20, pd=0.06, ts=ts_back)
 
-        p_front = sf.TwoFactorPortfolio(assets=assets_front, intra_sector_correlations=0.3)
-        p_back = sf.TwoFactorPortfolio(assets=assets_back, intra_sector_correlations=0.3)
+        p_front = sf.CreditPortfolio(assets=assets_front, intra_sector_correlations=0.3)
+        p_back = sf.CreditPortfolio(assets=assets_back, intra_sector_correlations=0.3)
 
         # Both have same cumulative PD, so total expected loss should be similar
         r_front = p_front.simulate(n_simulations=n_sims, n_periods=4, period_length=0.25)
@@ -135,7 +135,7 @@ class TestSubHorizonTermStructure:
         # systematic_lgd_correlation=0 so mean loss == sum PD·E[LGD]·exposure in
         # expectation, making the ratio across horizons a clean function of the curve.
         assets = _make_assets(n=20, pd=0.10, ts=self.TS)
-        p = sf.TwoFactorPortfolio(
+        p = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.2,
             systematic_lgd_correlation=0.0,
             config=SimulationConfig(seed=7),
@@ -155,13 +155,13 @@ class TestSubHorizonTermStructure:
 
     def test_longer_curve_emits_subhorizon_userwarning(self):
         assets = _make_assets(n=5, pd=0.10, ts=self.TS)
-        p = sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=0.2)
+        p = sf.CreditPortfolio(assets=assets, intra_sector_correlations=0.2)
         with pytest.warns(UserWarning, match="sub-horizon"):
             p.simulate(n_simulations=50, n_periods=2)
 
     def test_shorter_curve_raises(self):
         assets = _make_assets(n=5, pd=0.10, ts=[0.02, 0.05])  # only 2 points
-        p = sf.TwoFactorPortfolio(assets=assets, intra_sector_correlations=0.2)
+        p = sf.CreditPortfolio(assets=assets, intra_sector_correlations=0.2)
         with pytest.raises(RuntimeError, match="shorter than n_periods"):
             p.simulate(n_simulations=50, n_periods=4)
 
@@ -170,14 +170,14 @@ class TestMultiPeriodValidation:
     """Validate multi-period parameter checks."""
 
     def test_zero_periods_rejected(self):
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=3, sectors=["A"],
         )
         with pytest.raises(ValueError, match="n_periods must be positive"):
             portfolio.simulate(n_simulations=10, n_periods=0)
 
     def test_negative_period_length_rejected(self):
-        portfolio = sf.TwoFactorPortfolio.create_sample_portfolio(
+        portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=3, sectors=["A"],
         )
         with pytest.raises(ValueError, match="period_length must be positive"):
@@ -194,7 +194,7 @@ class TestMultiPeriodFallback:
         assets = _make_assets(n=6, pd=0.08)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            portfolio = sf.TwoFactorPortfolio(
+            portfolio = sf.CreditPortfolio(
                 assets=assets, intra_sector_correlations=0.3,
             )
             results = portfolio.simulate(
@@ -212,7 +212,7 @@ class TestMultiPeriodFallback:
         assets = _make_assets(n=6, pd=0.08, ts=ts)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            portfolio = sf.TwoFactorPortfolio(
+            portfolio = sf.CreditPortfolio(
                 assets=assets, intra_sector_correlations=0.3,
             )
             results = portfolio.simulate(
@@ -236,7 +236,7 @@ class TestRustNumpyCrossValidation:
         n_sims = 10_000
 
         # --- Rust path ---
-        p_rust = sf.TwoFactorPortfolio(
+        p_rust = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.35,
             config=SimulationConfig(seed=100),
         )
@@ -248,7 +248,7 @@ class TestRustNumpyCrossValidation:
             import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                p_np = sf.TwoFactorPortfolio(
+                p_np = sf.CreditPortfolio(
                     assets=assets, intra_sector_correlations=0.35,
                     config=SimulationConfig(seed=200),
                 )
@@ -270,7 +270,7 @@ class TestRustNumpyCrossValidation:
         n_sims = 10_000
 
         # --- Rust ---
-        p_rust = sf.TwoFactorPortfolio(
+        p_rust = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.35,
             config=SimulationConfig(seed=300),
         )
@@ -282,7 +282,7 @@ class TestRustNumpyCrossValidation:
             import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                p_np = sf.TwoFactorPortfolio(
+                p_np = sf.CreditPortfolio(
                     assets=assets, intra_sector_correlations=0.35,
                     config=SimulationConfig(seed=400),
                 )
@@ -303,7 +303,7 @@ class TestRustNumpyCrossValidation:
         assets = _make_assets(n=20, pd=0.10)
         n_sims = 10_000
 
-        p_rust = sf.TwoFactorPortfolio(
+        p_rust = sf.CreditPortfolio(
             assets=assets, intra_sector_correlations=0.3,
             config=SimulationConfig(seed=500),
         )
@@ -314,7 +314,7 @@ class TestRustNumpyCrossValidation:
             import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                p_np = sf.TwoFactorPortfolio(
+                p_np = sf.CreditPortfolio(
                     assets=assets, intra_sector_correlations=0.3,
                     config=SimulationConfig(seed=600),
                 )
