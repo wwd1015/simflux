@@ -47,6 +47,7 @@ class AssetData:
     sector_name: str
     intra_sector_correlation: Optional[float] = None
     pd_term_structure: Optional[List[float]] = None
+    lgd_term_structure: Optional[List[float]] = None
 
     def __post_init__(self) -> None:
         """Validate asset data after initialization."""
@@ -88,6 +89,22 @@ class AssetData:
                 f"sqrt(lgd_mean * (1 - lgd_mean)) = {max_lgd_std:.4f} "
                 f"for valid Beta distribution parameters"
             )
+
+        # A per-period LGD mean term structure: the obligor's realized LGD is drawn
+        # from a Beta with the mean for its *default* period (lgd_std is constant).
+        # Each per-period mean must be a valid mean and feasible with lgd_std.
+        if self.lgd_term_structure is not None:
+            for i, m in enumerate(self.lgd_term_structure):
+                if not 0 <= m <= 1:
+                    raise ValueError(
+                        f"lgd_term_structure[{i}] must be between 0 and 1, got {m}"
+                    )
+                if self.lgd_std >= sqrt(m * (1 - m)):
+                    raise ValueError(
+                        f"lgd_std ({self.lgd_std:.4f}) is infeasible for "
+                        f"lgd_term_structure[{i}] mean {m:.4f} "
+                        f"(must be < sqrt(mean*(1-mean)) = {sqrt(m * (1 - m)):.4f})"
+                    )
 
     @classmethod
     def from_dataframe(
@@ -607,6 +624,7 @@ class CreditPortfolio(BaseSimulator):
             sector_name=asset.sector_name,
             pd_term_structure=asset.pd_term_structure,
             intra_sector_correlation=asset.intra_sector_correlation,
+            lgd_term_structure=asset.lgd_term_structure,
         )
 
     # ------------------------------------------------------------------
@@ -693,10 +711,10 @@ class CreditPortfolio(BaseSimulator):
             systematic_lgd_correlations=self.systematic_lgd_correlations,
             sector_names=self.sector_names,
             asset_sector_ids=np.array([a.sector_id for a in self.assets]),
-            asset_lgd_means=np.array([a.lgd_mean for a in self.assets]),
+            lgd_means_by_period=self._get_lgd_means_by_period(n_periods),
             asset_lgd_stds=np.array([a.lgd_std for a in self.assets]),
             asset_exposures=np.array([a.exposure for a in self.assets]),
-            final_cumulative_pd=self._get_cumulative_pds(n_periods - 1, n_periods),
+            cumulative_pds_by_period=self._get_cumulative_pds_by_period(n_periods),
             n_simulations=n_simulations,
             n_periods=n_periods,
             default_timing=default_timing,
@@ -760,6 +778,27 @@ class CreditPortfolio(BaseSimulator):
             else:
                 result[i] = self._cumulative_pd_flat(a.pd, n_periods, period)
         return result
+
+    def _get_cumulative_pds_by_period(self, n_periods: int) -> np.ndarray:
+        """Per-asset cumulative PD by each period end: ``(n_periods, n_assets)``."""
+        return np.stack(
+            [self._get_cumulative_pds(k, n_periods) for k in range(n_periods)]
+        )
+
+    def _get_lgd_means_by_period(self, n_periods: int) -> np.ndarray:
+        """Per-asset LGD Beta mean at each period: ``(n_periods, n_assets)``.
+
+        An asset's ``lgd_term_structure`` value for the period (clamped to its last
+        entry) when provided, else its constant ``lgd_mean``.
+        """
+        out = np.empty((n_periods, len(self.assets)))
+        for j, a in enumerate(self.assets):
+            ts = a.lgd_term_structure
+            if ts:
+                out[:, j] = [ts[min(k, len(ts) - 1)] for k in range(n_periods)]
+            else:
+                out[:, j] = a.lgd_mean
+        return out
 
     def get_portfolio_summary(self) -> Dict[str, Any]:
         """Get summary statistics of the portfolio."""

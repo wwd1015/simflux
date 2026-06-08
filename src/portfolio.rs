@@ -50,12 +50,18 @@ pub struct AssetData {
     /// obligors in a sector may have heterogeneous loadings.
     #[pyo3(get, set)]
     pub intra_sector_correlation: Option<f64>,
+    /// Per-period LGD Beta mean.  When `None` the flat `lgd_mean` is used; when
+    /// present, an obligor that defaults in period `k` draws LGD from a Beta with
+    /// mean `lgd_term_structure[k]` (clamped to the last entry) and the constant
+    /// `lgd_std`.
+    #[pyo3(get, set)]
+    pub lgd_term_structure: Option<Vec<f64>>,
 }
 
 #[pymethods]
 impl AssetData {
     #[new]
-    #[pyo3(signature = (asset_id, sector_id, pd, lgd_mean, lgd_std, exposure, sector_name, pd_term_structure=None, intra_sector_correlation=None))]
+    #[pyo3(signature = (asset_id, sector_id, pd, lgd_mean, lgd_std, exposure, sector_name, pd_term_structure=None, intra_sector_correlation=None, lgd_term_structure=None))]
     pub fn new(
         asset_id: u32,
         sector_id: u32,
@@ -66,6 +72,7 @@ impl AssetData {
         sector_name: String,
         pd_term_structure: Option<Vec<f64>>,
         intra_sector_correlation: Option<f64>,
+        lgd_term_structure: Option<Vec<f64>>,
     ) -> PyResult<Self> {
         if pd < 0.0 || pd > 1.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -124,6 +131,24 @@ impl AssetData {
             }
         }
 
+        if let Some(ref ts) = lgd_term_structure {
+            let max_var = lgd_std * lgd_std;
+            for (i, &m) in ts.iter().enumerate() {
+                if !(0.0..=1.0).contains(&m) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "lgd_term_structure[{}] must be between 0 and 1",
+                        i
+                    )));
+                }
+                if max_var >= m * (1.0 - m) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "lgd_std is infeasible for lgd_term_structure[{}] mean {:.4}",
+                        i, m
+                    )));
+                }
+            }
+        }
+
         Ok(AssetData {
             asset_id,
             sector_id,
@@ -134,6 +159,7 @@ impl AssetData {
             sector_name,
             pd_term_structure,
             intra_sector_correlation,
+            lgd_term_structure,
         })
     }
 
@@ -632,7 +658,7 @@ fn simulate_single_trial(
                 default_time[idx] = Some((dperiod as f64 + 1.0) * period_length);
 
                 let lgd_corr = config.systematic_lgd_correlations[sector_index];
-                match compute_loss(asset, sector_factor, lgd_corr, &mut rng) {
+                match compute_loss(asset, dperiod, sector_factor, lgd_corr, &mut rng) {
                     Ok((loss, recovery)) => {
                         loss_amounts[idx] = loss;
                         recovery_rates[idx] = recovery;
@@ -675,7 +701,7 @@ fn simulate_single_trial(
                     default_time[idx] = Some((period as f64 + 1.0) * period_length);
 
                     let lgd_corr = config.systematic_lgd_correlations[sector_index];
-                    match compute_loss(asset, sector_factor, lgd_corr, &mut rng) {
+                    match compute_loss(asset, period, sector_factor, lgd_corr, &mut rng) {
                         Ok((loss, recovery)) => {
                             loss_amounts[idx] = loss;
                             recovery_rates[idx] = recovery;
@@ -731,15 +757,27 @@ fn simulate_single_trial(
     })
 }
 
-/// Compute loss amount and recovery rate for a defaulted asset.
+/// LGD Beta mean for an obligor defaulting in `period`: the term-structure value
+/// (clamped to its last entry) when present, else the flat `lgd_mean`.
+fn lgd_mean_at(asset: &AssetData, period: usize) -> f64 {
+    match &asset.lgd_term_structure {
+        Some(ts) if !ts.is_empty() => ts[period.min(ts.len() - 1)],
+        _ => asset.lgd_mean,
+    }
+}
+
+/// Compute loss amount and recovery rate for an asset defaulting in `period`.
 fn compute_loss(
     asset: &AssetData,
+    period: usize,
     sector_factor: f64,
     systematic_lgd_correlation: f64,
     rng: &mut StdRng,
 ) -> Result<(f64, f64), PortfolioError> {
-    let (alpha, beta) = asset
-        .get_lgd_beta_params()
+    // LGD Beta params from this obligor's mean at the default period (time-varying
+    // LGD when an lgd_term_structure is set) and its constant lgd_std.
+    let variance = asset.lgd_std * asset.lgd_std;
+    let (alpha, beta) = beta_mean_var_to_params(lgd_mean_at(asset, period), variance)
         .map_err(|e| PortfolioError::SimulationError(e.to_string()))?;
 
     // Wrong-way risk: a downturn is a LOW sector factor (defaults fire in the
@@ -871,6 +909,7 @@ mod tests {
             sector_name: "A".into(),
             pd_term_structure: None,
             intra_sector_correlation: None,
+            lgd_term_structure: None,
         };
         // Single period: conditional PD == flat PD
         assert!((get_conditional_pd(&asset, 0, 1) - 0.10).abs() < 1e-12);
@@ -891,6 +930,7 @@ mod tests {
             sector_name: "A".into(),
             pd_term_structure: Some(vec![0.02, 0.05, 0.08, 0.10]),
             intra_sector_correlation: None,
+            lgd_term_structure: None,
         };
         // Period 0: forward PD = cum[0] = 0.02
         assert!((get_conditional_pd(&asset, 0, 4) - 0.02).abs() < 1e-12);

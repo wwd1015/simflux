@@ -13,13 +13,18 @@ its total loss and per-sector loss, so retained memory is
 dense scratch is ``O(chunk * n_assets)`` rather than a full
 ``n_simulations * n_assets`` grid.  The per-simulation math is identical to the
 Rust path; the two agree in distribution, which is what cross-validation asserts.
+
+LGD may be time-varying: ``lgd_means_by_period`` carries one Beta mean per period
+per obligor, and an obligor's realized LGD is drawn from the Beta for the period
+it defaults in (``lgd_std`` is constant).  When the mean is constant across
+periods this reduces exactly to the time-invariant model.
 """
 
 from __future__ import annotations
 
 import warnings
 from math import erf
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 
@@ -43,10 +48,10 @@ def simulate_portfolio_numpy(
     systematic_lgd_correlations: Sequence[float],
     sector_names: Sequence[str],
     asset_sector_ids: np.ndarray,
-    asset_lgd_means: np.ndarray,
+    lgd_means_by_period: np.ndarray,
     asset_lgd_stds: np.ndarray,
     asset_exposures: np.ndarray,
-    final_cumulative_pd: np.ndarray,
+    cumulative_pds_by_period: np.ndarray,
     n_simulations: int,
     n_periods: int,
     default_timing: str,
@@ -55,12 +60,11 @@ def simulate_portfolio_numpy(
 ) -> Dict[str, Any]:
     """Run the portfolio loss simulation in vectorized NumPy.
 
-    Parameters mirror the model's resolved state: ``asset_*`` are per-obligor
-    arrays (already expanded from :class:`AssetData`), ``final_cumulative_pd`` is
-    the cumulative PD by horizon end per obligor (used by the copula model), and
-    ``barriers`` is the calibrated per-period barrier matrix (used by frailty).
-    Returns ``{"portfolio_statistics", "sector_statistics"}``; the caller stamps
-    the rest of the :class:`PortfolioResult` contract.
+    ``lgd_means_by_period`` and ``cumulative_pds_by_period`` are
+    ``(n_periods, n_assets)``: the obligor's LGD Beta mean, and its cumulative PD,
+    by period end.  ``barriers`` is the calibrated per-period barrier matrix
+    (frailty only).  Returns ``{"portfolio_statistics", "sector_statistics"}``;
+    the caller stamps the rest of the :class:`PortfolioResult` contract.
     """
     try:
         from scipy import stats as scipy_stats
@@ -105,9 +109,9 @@ def simulate_portfolio_numpy(
     )
 
     asset_sector_ids = np.asarray(asset_sector_ids)
-    asset_lgd_means = np.asarray(asset_lgd_means)
     asset_lgd_stds = np.asarray(asset_lgd_stds)
     asset_exposures = np.asarray(asset_exposures)
+    lgd_means_by_period = np.asarray(lgd_means_by_period, dtype=float)
 
     # Per-obligor intra-sector correlation (heterogeneous loadings within a sector
     # are allowed); already resolved to one value per asset by the caller.
@@ -119,62 +123,94 @@ def simulate_portfolio_numpy(
     asset_lgd_corrs = np.asarray(systematic_lgd_correlations)[asset_sector_ids]
     lgd_idio_scale = np.sqrt(np.maximum(0.0, 1 - asset_lgd_corrs**2))
 
-    lgd_alpha = asset_lgd_means * (
-        (asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1
-    )
-    lgd_beta_param = (1 - asset_lgd_means) * (
-        (asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1
-    )
+    # Beta (alpha, beta) per period per obligor, from the period's mean and the
+    # obligor's (constant) lgd_std. Shapes: (n_periods, n_assets).
+    _var = asset_lgd_stds[np.newaxis, :] ** 2
+    _common = lgd_means_by_period * (1 - lgd_means_by_period) / _var - 1
+    lgd_alpha_by_period = lgd_means_by_period * _common
+    lgd_beta_by_period = (1 - lgd_means_by_period) * _common
 
-    # Build the LGD inverse-CDF once, so the chunk loop below never recomputes it.
-    # With scipy, beta.ppf is cheap and stateless, so call it per chunk. Without
-    # scipy, tabulate I_x(alpha, beta) once per *distinct* obligor (alpha, beta)
-    # up front and invert by interpolation per chunk — otherwise the (expensive)
-    # tabulation would repeat on every chunk.
+    # LGD inverse-CDF, accepting per-element (alpha, beta). With scipy, beta.ppf is
+    # vectorized and exact. Without scipy, tabulate I_x(alpha, beta) once per
+    # *distinct* (alpha, beta) pair seen (cached across chunks and periods) and
+    # invert by interpolation — so chunking never recomputes a table.
     if have_scipy:
 
-        def _inv_beta(lgd_uniform: np.ndarray) -> np.ndarray:
-            return beta_ppf(
-                lgd_uniform,
-                lgd_alpha[np.newaxis, :],
-                lgd_beta_param[np.newaxis, :],
-            )
+        def _inv_beta(u: np.ndarray, alpha: np.ndarray, beta: np.ndarray) -> np.ndarray:
+            return beta_ppf(u, alpha, beta)
 
     else:
         from ..utils.special import reg_incomplete_beta as _reg_incomplete_beta
 
         _lgd_grid = np.linspace(0.0, 1.0, 8192)
         _cdf_cache: Dict[tuple, np.ndarray] = {}
-        _col_cdf: List[np.ndarray] = []
-        for _a, _b in zip(lgd_alpha, lgd_beta_param):
-            _key = (float(_a), float(_b))
-            _cdf = _cdf_cache.get(_key)
-            if _cdf is None:
-                _cdf = _reg_incomplete_beta(_a, _b, _lgd_grid)
-                np.maximum.accumulate(_cdf, out=_cdf)  # monotone for np.interp
-                _cdf_cache[_key] = _cdf
-            _col_cdf.append(_cdf)
 
-        def _inv_beta(lgd_uniform: np.ndarray) -> np.ndarray:
-            out = np.empty_like(lgd_uniform)
-            for j in range(lgd_uniform.shape[-1]):
-                out[..., j] = np.interp(lgd_uniform[..., j], _col_cdf[j], _lgd_grid)
-            return out
+        def _beta_table(av: float, bv: float) -> np.ndarray:
+            cdf = _cdf_cache.get((av, bv))
+            if cdf is None:
+                cdf = _reg_incomplete_beta(av, bv, _lgd_grid)
+                np.maximum.accumulate(cdf, out=cdf)  # monotone for np.interp
+                _cdf_cache[(av, bv)] = cdf
+            return cdf
 
-    def _lgd_from_normal(lgd_normal: np.ndarray) -> np.ndarray:
+        if np.allclose(lgd_means_by_period, lgd_means_by_period[0:1]):
+            # Time-invariant LGD (the common case): the per-element (alpha, beta)
+            # passed in are constant down each obligor column, so tabulate once per
+            # column and interpolate per column — no per-call np.unique grouping.
+            _col_cdf = [
+                _beta_table(
+                    float(lgd_alpha_by_period[0, j]), float(lgd_beta_by_period[0, j])
+                )
+                for j in range(n_assets)
+            ]
+
+            def _inv_beta(
+                u: np.ndarray, alpha: np.ndarray, beta: np.ndarray
+            ) -> np.ndarray:
+                out = np.empty_like(u)
+                for j in range(u.shape[-1]):
+                    out[..., j] = np.interp(u[..., j], _col_cdf[j], _lgd_grid)
+                return out
+
+        else:
+            # Time-varying LGD: (alpha, beta) vary per element (by default period),
+            # so group the distinct pairs and interpolate each group.
+            def _inv_beta(
+                u: np.ndarray, alpha: np.ndarray, beta: np.ndarray
+            ) -> np.ndarray:
+                u = np.asarray(u, dtype=float)
+                alpha = np.broadcast_to(np.asarray(alpha, dtype=float), u.shape)
+                beta = np.broadcast_to(np.asarray(beta, dtype=float), u.shape)
+                out = np.empty_like(u)
+                flat_out = out.ravel()
+                flat_u = u.ravel()
+                pairs = np.stack([alpha.ravel(), beta.ravel()], axis=1)
+                uniq, inv_idx = np.unique(pairs, axis=0, return_inverse=True)
+                inv_idx = inv_idx.ravel()
+                for p_i in range(len(uniq)):
+                    sel = inv_idx == p_i
+                    flat_out[sel] = np.interp(
+                        flat_u[sel],
+                        _beta_table(float(uniq[p_i, 0]), float(uniq[p_i, 1])),
+                        _lgd_grid,
+                    )
+                return out
+
+    def _lgd_from_normal(
+        lgd_normal: np.ndarray, alpha: np.ndarray, beta: np.ndarray
+    ) -> np.ndarray:
         """Map a standard-normal LGD driver through the Gaussian copula to a
-        Beta-distributed realized LGD, using the precomputed inverse CDF."""
+        Beta-distributed realized LGD with the given (per-element) Beta params."""
         lgd_uniform = np.clip(
             0.5 * (1 + erf_func(lgd_normal / np.sqrt(2))), 1e-12, 1 - 1e-12
         )
-        return _inv_beta(lgd_uniform)
+        return _inv_beta(lgd_uniform, alpha, beta)
 
-    if default_timing == "copula":
-        # One-factor Gaussian copula of default *times* (Li, 2000): a single latent
-        # V per obligor for the whole horizon, thresholded against the cumulative
-        # PD. Default by horizon <=> V <= Phi^{-1}(cum_final); the marginal
-        # cumulative PD is reproduced exactly for any correlation.
-        final_threshold = norm_ppf(np.asarray(final_cumulative_pd))
+    # Per-period default thresholds (copula): Phi^{-1}(cumulative PD by period end).
+    # Non-decreasing in period because cumulative PD is, so the first period whose
+    # threshold a frozen latent crosses is its default period.
+    thresholds_by_period = norm_ppf(np.asarray(cumulative_pds_by_period, dtype=float))
+    asset_cols = np.arange(n_assets)
 
     # Asset column indices per sector, computed once for the chunk reduction.
     sector_asset_cols = [
@@ -190,13 +226,22 @@ def simulate_portfolio_numpy(
             sector_loadings[np.newaxis, :] * asset_sector_factors
             + idio_loadings[np.newaxis, :] * idiosyncratic
         )
-        defaulted = latent <= final_threshold[np.newaxis, :]
-        if not np.any(defaulted):
+        # First period whose cumulative threshold is crossed = the default period.
+        default_period = np.zeros((n_chunk, n_assets), dtype=np.intp)
+        ever = np.zeros((n_chunk, n_assets), dtype=bool)
+        for k in range(n_periods):
+            newly = (latent <= thresholds_by_period[k][np.newaxis, :]) & ~ever
+            if k > 0:
+                default_period[newly] = k
+            ever |= newly
+        if not np.any(ever):
             return np.zeros((n_chunk, n_assets))
         lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
         lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(size=(n_chunk, n_assets))
-        lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
-        return np.where(defaulted, lgd_realized * asset_exposures[np.newaxis, :], 0.0)
+        alpha = lgd_alpha_by_period[default_period, asset_cols[np.newaxis, :]]
+        beta = lgd_beta_by_period[default_period, asset_cols[np.newaxis, :]]
+        lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio, alpha, beta)
+        return np.where(ever, lgd_realized * asset_exposures[np.newaxis, :], 0.0)
 
     def _frailty_chunk_losses(n_chunk: int) -> np.ndarray:
         # Dynamic frailty: a persistent (AR(1)) systematic factor with fresh
@@ -228,12 +273,16 @@ def simulate_portfolio_numpy(
             if np.any(new_defaults):
                 # Wrong-way risk: LGD loads on the NEGATIVE of the (per-sector)
                 # factor, so positive systematic_lgd_correlation => higher LGD in
-                # stress.
+                # stress.  LGD Beta params are this period's.
                 lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
                 lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(
                     size=(n_chunk, n_assets)
                 )
-                lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
+                lgd_realized = _lgd_from_normal(
+                    lgd_sys + lgd_idio,
+                    lgd_alpha_by_period[period][np.newaxis, :],
+                    lgd_beta_by_period[period][np.newaxis, :],
+                )
                 period_losses = lgd_realized * asset_exposures[np.newaxis, :]
                 chunk_losses = np.where(new_defaults, period_losses, chunk_losses)
 
