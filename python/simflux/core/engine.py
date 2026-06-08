@@ -4,7 +4,13 @@ import numpy as np
 from typing import Optional, List, Any
 from .base import SimulationConfig, check_memory
 from .backend import Backend
-from ..utils.random_utils import validate_correlation_matrix_strict, safe_cholesky
+from .validation import (
+    validate_gbm_params,
+    validate_correlated_gbm_params,
+    validate_time_varying_params,
+    validate_time_varying_correlated_params,
+)
+from ..utils.random_utils import safe_cholesky
 
 
 def _validate_sim_dims(n_paths: int, n_steps: int, T: float) -> None:
@@ -58,10 +64,7 @@ class SimulationEngine:
 
         Returns shape ``(n_paths, n_steps + 1)``.
         """
-        if sigma <= 0:
-            raise ValueError("sigma must be positive")
-        if s0 <= 0:
-            raise ValueError("s0 must be positive")
+        validate_gbm_params(sigma, s0)
         _validate_sim_dims(n_paths, n_steps, T)
         self._check_memory(n_paths * (n_steps + 1))
 
@@ -84,19 +87,7 @@ class SimulationEngine:
         Returns shape ``(n_paths, n_assets, n_steps + 1)``.
         """
         n_assets = len(mu)
-        if len(sigma) != n_assets:
-            raise ValueError("sigma must have same length as mu")
-        if len(s0) != n_assets:
-            raise ValueError("s0 must have same length as mu")
-        if correlation_matrix.shape != (n_assets, n_assets):
-            raise ValueError(f"correlation_matrix must be {n_assets}x{n_assets}")
-        validate_correlation_matrix_strict(correlation_matrix)
-        for s in sigma:
-            if s <= 0:
-                raise ValueError("all sigma values must be positive")
-        for sv in s0:
-            if sv <= 0:
-                raise ValueError("all s0 values must be positive")
+        validate_correlated_gbm_params(mu, sigma, s0, correlation_matrix)
         _validate_sim_dims(n_paths, n_steps, T)
         self._check_memory(n_paths * n_assets * (n_steps + 1))
 
@@ -123,6 +114,7 @@ class SimulationEngine:
 
         Returns shape ``(n_paths, n_steps + 1)``.
         """
+        validate_time_varying_params(mu_times, mu_values, sigma_times, sigma_values)
         _validate_sim_dims(n_paths, n_steps, T)
         self._check_memory(n_paths * (n_steps + 1))
 
@@ -151,6 +143,9 @@ class SimulationEngine:
         Returns shape ``(n_paths, n_assets, n_steps + 1)``.
         """
         n_assets = len(s0)
+        validate_time_varying_correlated_params(
+            mu_times, sigma_times, n_assets, correlation_matrix
+        )
         _validate_sim_dims(n_paths, n_steps, T)
         self._check_memory(n_paths * n_assets * (n_steps + 1))
 
