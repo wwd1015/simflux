@@ -158,7 +158,7 @@ example-portfolio: ## Run portfolio example
 import simflux as sf; \
 import numpy as np; \
 print('Running portfolio example...'); \
-portfolio = sf.TwoFactorPortfolio.create_sample_portfolio([10, 10], ['Tech', 'Finance']); \
+portfolio = sf.CreditPortfolio.create_sample_portfolio([10, 10], ['Tech', 'Finance']); \
 results = portfolio.simulate(n_simulations=100); \
 stats = results['portfolio_statistics']; \
 print(f'Portfolio VaR 95%: {stats[\"var_95\"]:,.0f}'); \
