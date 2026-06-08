@@ -98,7 +98,7 @@ jobs:
         assert Backend.is_available(), 'Rust backend not found in wheel'
         paths = sf.GBM(mu=0.05, sigma=0.2, S0=100).simulate(n_paths=100, n_steps=10)
         assert paths.shape == (100, 11)
-        p = sf.TwoFactorPortfolio.create_sample_portfolio(n_assets_per_sector=5, sectors=['A','B'])
+        p = sf.CreditPortfolio.create_sample_portfolio(n_assets_per_sector=5, sectors=['A','B'])
         r = p.simulate(n_simulations=50)
         assert r['portfolio_statistics']['mean'] >= 0
         print('Smoke test passed')
