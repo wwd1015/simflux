@@ -11,7 +11,10 @@ from typing import Any, Union, List, Optional, Tuple
 
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.engine import SimulationEngine
-from ..utils.random_utils import validate_correlation_matrix_strict
+from ..core.validation import (
+    validate_time_varying_params,
+    validate_time_varying_correlated_params,
+)
 
 
 def _linear_interpolate(t: float, times: np.ndarray, values: np.ndarray) -> float:
@@ -51,10 +54,9 @@ class TimeVaryingGBM(BaseSimulator):
         Raises ``ValueError`` on mismatched series lengths.  Per-run dimension
         checks (n_paths/n_steps/T) are owned by the engine seam.
         """
-        if len(self.mu_times) != len(self.mu_values):
-            raise ValueError("mu_times and mu_values must have same length")
-        if len(self.sigma_times) != len(self.sigma_values):
-            raise ValueError("sigma_times and sigma_values must have same length")
+        validate_time_varying_params(
+            self.mu_times, self.mu_values, self.sigma_times, self.sigma_values
+        )
 
     def get_parameters_at_time(self, t: float) -> Tuple[float, float]:
         """Interpolate mu and sigma at time ``t`` for inspection.
@@ -135,12 +137,8 @@ class TimeVaryingCorrelatedGBM(BaseSimulator):
         or an invalid correlation matrix, matching every other simulator's error
         mode.  Per-run dimension checks are owned by the engine seam.
         """
-        if len(self.mu_times) != self.n_assets:
-            raise ValueError("Must provide mu time series for each asset")
-        if len(self.sigma_times) != self.n_assets:
-            raise ValueError("Must provide sigma time series for each asset")
-        validate_correlation_matrix_strict(
-            self.correlation_matrix, name="correlation_matrix"
+        validate_time_varying_correlated_params(
+            self.mu_times, self.sigma_times, self.n_assets, self.correlation_matrix
         )
 
     def get_parameters_at_time(self, t: float) -> Tuple[np.ndarray, np.ndarray]:

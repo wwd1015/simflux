@@ -4,7 +4,7 @@ import numpy as np
 from typing import Optional, List, Union
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.engine import SimulationEngine
-from ..utils.random_utils import validate_correlation_matrix_strict
+from ..core.validation import validate_gbm_params, validate_correlated_gbm_params
 
 
 class GBM(BaseSimulator):
@@ -50,11 +50,8 @@ class GBM(BaseSimulator):
         self.validate_inputs(mu, sigma, S0)
 
     def validate_inputs(self, mu, sigma, S0):
-        """Validate GBM parameters."""
-        if sigma <= 0:
-            raise ValueError("sigma must be positive")
-        if S0 <= 0:
-            raise ValueError("S0 must be positive")
+        """Validate GBM parameters (one validator, shared with the engine seam)."""
+        validate_gbm_params(sigma, S0, s0_label="S0")
 
     def simulate(self, n_paths: int, n_steps: int, T: float = 1.0) -> np.ndarray:
         """
@@ -167,24 +164,8 @@ class CorrelatedGBM(BaseSimulator):
         self.validate_inputs(mu, sigma, S0, self.correlation_matrix)
 
     def validate_inputs(self, mu, sigma, S0, correlation_matrix):
-        """Validate correlated GBM parameters."""
-        n_assets = len(mu)
-
-        if len(sigma) != n_assets:
-            raise ValueError("sigma must have same length as mu")
-        if len(S0) != n_assets:
-            raise ValueError("S0 must have same length as mu")
-
-        if correlation_matrix.shape != (n_assets, n_assets):
-            raise ValueError(f"correlation_matrix must be {n_assets}x{n_assets}")
-
-        for i, (m, s, s0) in enumerate(zip(mu, sigma, S0)):
-            if s <= 0:
-                raise ValueError(f"sigma[{i}] must be positive")
-            if s0 <= 0:
-                raise ValueError(f"S0[{i}] must be positive")
-
-        validate_correlation_matrix_strict(correlation_matrix)
+        """Validate correlated GBM parameters (shared with the engine seam)."""
+        validate_correlated_gbm_params(mu, sigma, S0, correlation_matrix, s0_label="S0")
 
     def simulate(self, n_paths: int, n_steps: int, T: float = 1.0) -> np.ndarray:
         """

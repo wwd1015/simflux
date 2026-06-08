@@ -3,25 +3,14 @@
 import numpy as np
 import pandas as pd
 import warnings
-from math import erf, sqrt
-from typing import List, Optional, Dict, Any, Union, TypedDict, NotRequired
+from math import sqrt
+from typing import List, Optional, Dict, Any, Union, TypedDict, NotRequired, cast
 from dataclasses import dataclass
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.backend import Backend, CORRELATION_TOLERANCE
 from ..utils.storage import StorageConfig, ParquetResultsAnalyzer
-from ..utils.random_utils import (
-    validate_correlation_matrix_strict,
-    approx_norm_ppf,
-    safe_cholesky,
-)
-
-# Max f64 elements in one dense (chunk, n_assets) scratch array in the NumPy
-# fallback. The fallback reduces each chunk of simulations to per-trial summaries
-# (mirroring the Rust backend), so this caps peak scratch instead of letting it
-# scale with n_simulations. ~32K elements keeps the dozen-odd live intermediates
-# down to a few MB total with no measurable throughput loss (NumPy vectorization
-# saturates well below this batch size); larger caps only inflate peak memory.
-_FALLBACK_CHUNK_ELEMENTS = 32_768
+from ..utils.random_utils import validate_correlation_matrix_strict
+from .numpy_simulation import simulate_portfolio_numpy
 
 
 @dataclass
@@ -560,55 +549,23 @@ class TwoFactorPortfolio(BaseSimulator):
         output_path = storage_config.output_path if storage_config else None
         batch_size = storage_config.batch_size if storage_config else None
 
-        if Backend.is_available():
-            _rust = Backend.get_rust()
-            rust_assets = [self._convert_asset_to_rust(asset) for asset in self.assets]
-
-            # The full sector correlation matrix is the single source of truth for
-            # cross-sector coupling; no scalar summary rides the seam.
-            rust_config = _rust.PortfolioConfig(
-                intra_sector_correlations=self.intra_sector_correlations,
-                systematic_lgd_correlations=self.systematic_lgd_correlations,
-                sector_names=self.sector_names,
-                sector_correlation_matrix=self.sector_correlation_matrix.tolist(),
-            )
-
-            try:
-                results = _rust.simulate_portfolio(
-                    config=rust_config,
-                    assets=rust_assets,
-                    n_simulations=n_simulations,
-                    n_periods=n_periods,
-                    period_length=period_length,
-                    default_timing=default_timing,
-                    factor_phi=factor_phi,
-                    barriers=(barriers.T.tolist() if barriers is not None else []),
-                    seed=self.config.seed,
-                    store_interim=store_interim,
-                    output_path=output_path,
-                    batch_size=batch_size,
-                )
-            except RuntimeError as exc:
-                if store_interim:
-                    raise RuntimeError(
-                        "Interim storage via the Rust backend is not available; disable "
-                        "store_interim or run in Python fallback mode."
-                    ) from exc
-                raise
-        else:
-            if store_interim:
-                warnings.warn(
-                    "Interim storage requires the Rust backend; proceeding without persistence.",
-                    RuntimeWarning,
-                )
-            results = self._fallback_simulate_portfolio(
-                n_simulations=n_simulations,
-                n_periods=n_periods,
-                period_length=period_length,
-                default_timing=default_timing,
-                factor_phi=factor_phi,
-                barriers=barriers,
-            )
+        # One dispatch seam, shared with the GBM engine: pick the active backend
+        # adapter (Rust or NumPy) and run it. Both adapters take the same keyword
+        # contract and return the same key set.
+        run = Backend.choose(
+            self._simulate_portfolio_rust, self._simulate_portfolio_numpy
+        )
+        results = run(
+            n_simulations=n_simulations,
+            n_periods=n_periods,
+            period_length=period_length,
+            default_timing=default_timing,
+            factor_phi=factor_phi,
+            barriers=barriers,
+            store_interim=store_interim,
+            output_path=output_path,
+            batch_size=batch_size,
+        )
 
         # Stamp the result contract uniformly so both backends return the same
         # key set regardless of install state (see PortfolioResult).  n_trials is
@@ -630,7 +587,9 @@ class TwoFactorPortfolio(BaseSimulator):
         if store_interim and output_path and Backend.is_available():
             results["analyzer"] = ParquetResultsAnalyzer(output_path)
 
-        return results
+        # Both adapters return a bare dict; the stamping above completes the
+        # PortfolioResult contract, so the cast is honest.
+        return cast(PortfolioResult, results)
 
     def _convert_asset_to_rust(self, asset: AssetData) -> Any:
         """Convert Python AssetData to Rust AssetData."""
@@ -647,7 +606,102 @@ class TwoFactorPortfolio(BaseSimulator):
         )
 
     # ------------------------------------------------------------------
-    # Conditional PD helpers (used by NumPy fallback)
+    # Backend adapters (selected by Backend.choose in simulate)
+    # ------------------------------------------------------------------
+
+    def _simulate_portfolio_rust(
+        self,
+        *,
+        n_simulations: int,
+        n_periods: int,
+        period_length: float,
+        default_timing: str,
+        factor_phi: float,
+        barriers: Optional[np.ndarray],
+        store_interim: bool,
+        output_path: Optional[str],
+        batch_size: Optional[int],
+    ) -> Dict[str, Any]:
+        """Run the simulation on the Rust backend."""
+        _rust = Backend.get_rust()
+        rust_assets = [self._convert_asset_to_rust(asset) for asset in self.assets]
+
+        # The full sector correlation matrix is the single source of truth for
+        # cross-sector coupling; no scalar summary rides the seam.
+        rust_config = _rust.PortfolioConfig(
+            intra_sector_correlations=self.intra_sector_correlations,
+            systematic_lgd_correlations=self.systematic_lgd_correlations,
+            sector_names=self.sector_names,
+            sector_correlation_matrix=self.sector_correlation_matrix.tolist(),
+        )
+
+        try:
+            return _rust.simulate_portfolio(
+                config=rust_config,
+                assets=rust_assets,
+                n_simulations=n_simulations,
+                n_periods=n_periods,
+                period_length=period_length,
+                default_timing=default_timing,
+                factor_phi=factor_phi,
+                barriers=(barriers.T.tolist() if barriers is not None else []),
+                seed=self.config.seed,
+                store_interim=store_interim,
+                output_path=output_path,
+                batch_size=batch_size,
+            )
+        except RuntimeError as exc:
+            if store_interim:
+                raise RuntimeError(
+                    "Interim storage via the Rust backend is not available; disable "
+                    "store_interim or run in Python fallback mode."
+                ) from exc
+            raise
+
+    def _simulate_portfolio_numpy(
+        self,
+        *,
+        n_simulations: int,
+        n_periods: int,
+        period_length: float,
+        default_timing: str,
+        factor_phi: float,
+        barriers: Optional[np.ndarray],
+        store_interim: bool,
+        output_path: Optional[str],
+        batch_size: Optional[int],
+    ) -> Dict[str, Any]:
+        """Run the simulation on the NumPy fallback adapter.
+
+        Resolves the model's per-obligor arrays and delegates to
+        :func:`simflux.portfolio.numpy_simulation.simulate_portfolio_numpy`.
+        Interim storage is Rust-only, so it is not honored here.
+        """
+        if store_interim:
+            warnings.warn(
+                "Interim storage requires the Rust backend; proceeding without persistence.",
+                RuntimeWarning,
+            )
+        return simulate_portfolio_numpy(
+            config=self.config,
+            sector_correlation_matrix=self.sector_correlation_matrix,
+            intra_sector_correlations=self.intra_sector_correlations,
+            systematic_lgd_correlations=self.systematic_lgd_correlations,
+            sector_names=self.sector_names,
+            asset_sector_ids=np.array([a.sector_id for a in self.assets]),
+            asset_lgd_means=np.array([a.lgd_mean for a in self.assets]),
+            asset_lgd_stds=np.array([a.lgd_std for a in self.assets]),
+            asset_exposures=np.array([a.exposure for a in self.assets]),
+            final_cumulative_pd=self._get_cumulative_pds(n_periods - 1, n_periods),
+            n_simulations=n_simulations,
+            n_periods=n_periods,
+            default_timing=default_timing,
+            factor_phi=factor_phi,
+            barriers=barriers,
+        )
+
+    # ------------------------------------------------------------------
+    # Conditional PD helpers (used by frailty barrier calibration)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -702,262 +756,6 @@ class TwoFactorPortfolio(BaseSimulator):
             else:
                 result[i] = self._cumulative_pd_flat(a.pd, n_periods, period)
         return result
-
-    # ------------------------------------------------------------------
-    # NumPy fallback
-    # ------------------------------------------------------------------
-
-    def _fallback_simulate_portfolio(
-        self,
-        n_simulations: int,
-        n_periods: int = 1,
-        period_length: float = 1.0,
-        default_timing: str = "copula",
-        factor_phi: float = 0.0,
-        barriers: Optional[np.ndarray] = None,
-    ) -> Dict[str, Any]:
-        """Fallback portfolio simulation using vectorized NumPy (no Rust)."""
-        try:
-            from scipy import stats as scipy_stats
-            from scipy.special import erf as scipy_erf
-
-            norm_ppf = scipy_stats.norm.ppf
-            beta_ppf = scipy_stats.beta.ppf
-            erf_func = scipy_erf
-            have_scipy = True
-        except ImportError:
-            # No scipy: use dependency-free fallbacks. The Beta inverse-CDF is an
-            # accurate tabulated inversion (utils/special), so LGD is correct, not
-            # approximate; only the normal-quantile uses an approximation.
-            warnings.warn(
-                "scipy not available; using built-in special-function fallbacks "
-                "(accurate Beta inverse-CDF, approximate normal quantile). Install "
-                "scipy for the reference implementation.",
-                UserWarning,
-            )
-            from ..utils.special import beta_ppf as _fallback_beta_ppf
-
-            norm_ppf = approx_norm_ppf
-            beta_ppf = _fallback_beta_ppf
-            erf_func = np.vectorize(erf)
-            have_scipy = False
-
-        rng = np.random.default_rng(self.config.seed)
-
-        n_assets = len(self.assets)
-        n_sectors = len(self.sector_names)
-        if n_sectors == 0:
-            raise ValueError("Portfolio must contain at least one sector")
-
-        # Retained outputs are O(n_simulations * n_sectors) (per-trial total and
-        # per-sector loss); dense per-chunk scratch is bounded independently of
-        # n_simulations (see _FALLBACK_CHUNK_ELEMENTS), so the guard no longer
-        # scales with n_assets * n_simulations.
-        self._check_memory(
-            n_simulations * (n_sectors + 1) + 8 * _FALLBACK_CHUNK_ELEMENTS
-        )
-
-        sector_cholesky = safe_cholesky(
-            self.sector_correlation_matrix, name="sector_correlation_matrix"
-        )
-
-        asset_sector_ids = np.array([a.sector_id for a in self.assets])
-        asset_lgd_means = np.array([a.lgd_mean for a in self.assets])
-        asset_lgd_stds = np.array([a.lgd_std for a in self.assets])
-        asset_exposures = np.array([a.exposure for a in self.assets])
-
-        intra_corrs = np.array(self.intra_sector_correlations)
-        asset_intra_corrs = intra_corrs[asset_sector_ids]
-        sector_loadings = np.sqrt(asset_intra_corrs)
-        idio_loadings = np.sqrt(np.maximum(0.0, 1 - asset_intra_corrs))
-
-        # Per-sector LGD-systematic correlation, expanded to one value per asset.
-        asset_lgd_corrs = np.array(self.systematic_lgd_correlations)[asset_sector_ids]
-        lgd_idio_scale = np.sqrt(np.maximum(0.0, 1 - asset_lgd_corrs**2))
-
-        lgd_alpha = asset_lgd_means * (
-            (asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1
-        )
-        lgd_beta_param = (1 - asset_lgd_means) * (
-            (asset_lgd_means * (1 - asset_lgd_means)) / (asset_lgd_stds**2) - 1
-        )
-
-        # Build the LGD inverse-CDF once, so the chunk loop below never recomputes
-        # it. With scipy, beta.ppf is cheap and stateless, so call it per chunk.
-        # Without scipy, tabulate I_x(alpha, beta) once per *distinct* obligor
-        # (alpha, beta) up front and invert by interpolation per chunk — otherwise
-        # the (expensive) tabulation would repeat on every chunk.
-        if have_scipy:
-
-            def _inv_beta(lgd_uniform: np.ndarray) -> np.ndarray:
-                return beta_ppf(
-                    lgd_uniform,
-                    lgd_alpha[np.newaxis, :],
-                    lgd_beta_param[np.newaxis, :],
-                )
-
-        else:
-            from ..utils.special import reg_incomplete_beta as _reg_incomplete_beta
-
-            _lgd_grid = np.linspace(0.0, 1.0, 8192)
-            _cdf_cache: Dict[tuple, np.ndarray] = {}
-            _col_cdf: List[np.ndarray] = []
-            for _a, _b in zip(lgd_alpha, lgd_beta_param):
-                _key = (float(_a), float(_b))
-                _cdf = _cdf_cache.get(_key)
-                if _cdf is None:
-                    _cdf = _reg_incomplete_beta(_a, _b, _lgd_grid)
-                    np.maximum.accumulate(_cdf, out=_cdf)  # monotone for np.interp
-                    _cdf_cache[_key] = _cdf
-                _col_cdf.append(_cdf)
-
-            def _inv_beta(lgd_uniform: np.ndarray) -> np.ndarray:
-                out = np.empty_like(lgd_uniform)
-                for j in range(lgd_uniform.shape[-1]):
-                    out[..., j] = np.interp(lgd_uniform[..., j], _col_cdf[j], _lgd_grid)
-                return out
-
-        def _lgd_from_normal(lgd_normal: np.ndarray) -> np.ndarray:
-            """Map a standard-normal LGD driver through the Gaussian copula to a
-            Beta-distributed realized LGD, using the precomputed inverse CDF."""
-            lgd_uniform = np.clip(
-                0.5 * (1 + erf_func(lgd_normal / np.sqrt(2))), 1e-12, 1 - 1e-12
-            )
-            return _inv_beta(lgd_uniform)
-
-        # Memory-frugal reduction.  The Rust backend never materializes a dense
-        # (n_simulations, n_assets) loss grid: each trial is reduced on the fly to
-        # its total loss and per-sector loss (TrialResult), so its retained memory
-        # is O(n_simulations * n_sectors).  The fallback now matches that — it
-        # walks the simulations in chunks and reduces each chunk to the same two
-        # summaries, capping dense scratch at O(chunk * n_assets) instead of
-        # holding ~8 simultaneous (n_simulations, n_assets) arrays.  The
-        # per-simulation math is byte-for-byte the same as the full-grid version;
-        # only the random-draw order changes, so the loss *distribution* (and
-        # every cross-validated statistic) is unchanged.
-        if default_timing == "copula":
-            # One-factor Gaussian copula of default *times* (Li, 2000): a single
-            # latent V per obligor for the whole horizon, thresholded against the
-            # cumulative PD.  Default by horizon <=> V <= Phi^{-1}(cum_final); the
-            # marginal cumulative PD is reproduced exactly for any correlation.
-            cum_final = self._get_cumulative_pds(n_periods - 1, n_periods)
-            final_threshold = norm_ppf(cum_final)
-
-        # Asset column indices per sector, computed once for the chunk reduction.
-        sector_asset_cols = [
-            np.flatnonzero(asset_sector_ids == s) for s in range(n_sectors)
-        ]
-        chunk = max(1, min(n_simulations, _FALLBACK_CHUNK_ELEMENTS // max(1, n_assets)))
-
-        def _copula_chunk_losses(n_chunk: int) -> np.ndarray:
-            sector_factor_all = (
-                rng.normal(size=(n_chunk, n_sectors)) @ sector_cholesky.T
-            )
-            asset_sector_factors = sector_factor_all[:, asset_sector_ids]
-            idiosyncratic = rng.normal(size=(n_chunk, n_assets))
-            latent = (
-                sector_loadings[np.newaxis, :] * asset_sector_factors
-                + idio_loadings[np.newaxis, :] * idiosyncratic
-            )
-            defaulted = latent <= final_threshold[np.newaxis, :]
-            if not np.any(defaulted):
-                return np.zeros((n_chunk, n_assets))
-            lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
-            lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(
-                size=(n_chunk, n_assets)
-            )
-            lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
-            return np.where(
-                defaulted, lgd_realized * asset_exposures[np.newaxis, :], 0.0
-            )
-
-        def _frailty_chunk_losses(n_chunk: int) -> np.ndarray:
-            # Dynamic frailty: a persistent (AR(1)) systematic factor with fresh
-            # idiosyncratic shocks each period; first-passage against the
-            # pre-calibrated barriers (which preserve the marginal PD for any phi).
-            assert barriers is not None  # always computed for default_timing="frailty"
-            sqrt_innov = (max(0.0, 1.0 - factor_phi**2)) ** 0.5
-            prev_factor: Optional[np.ndarray] = None
-            ever_defaulted = np.zeros((n_chunk, n_assets), dtype=bool)
-            chunk_losses = np.zeros((n_chunk, n_assets))
-            for period in range(n_periods):
-                innovation = rng.normal(size=(n_chunk, n_sectors)) @ sector_cholesky.T
-                if prev_factor is None:
-                    sector_factor_all = innovation
-                else:
-                    sector_factor_all = (
-                        factor_phi * prev_factor + sqrt_innov * innovation
-                    )
-                prev_factor = sector_factor_all
-                asset_sector_factors = sector_factor_all[:, asset_sector_ids]
-
-                idiosyncratic = rng.normal(size=(n_chunk, n_assets))
-                asset_values = (
-                    sector_loadings[np.newaxis, :] * asset_sector_factors
-                    + idio_loadings[np.newaxis, :] * idiosyncratic
-                )
-
-                thresholds = barriers[period]  # (n_assets,) calibrated barrier
-                new_defaults = (
-                    asset_values <= thresholds[np.newaxis, :]
-                ) & ~ever_defaulted
-
-                if np.any(new_defaults):
-                    # Wrong-way risk: LGD loads on the NEGATIVE of the (per-sector)
-                    # factor, so positive systematic_lgd_correlation => higher LGD
-                    # in stress.
-                    lgd_sys = -asset_lgd_corrs[np.newaxis, :] * asset_sector_factors
-                    lgd_idio = lgd_idio_scale[np.newaxis, :] * rng.normal(
-                        size=(n_chunk, n_assets)
-                    )
-                    lgd_realized = _lgd_from_normal(lgd_sys + lgd_idio)
-                    period_losses = lgd_realized * asset_exposures[np.newaxis, :]
-                    chunk_losses = np.where(new_defaults, period_losses, chunk_losses)
-
-                ever_defaulted |= new_defaults
-            return chunk_losses
-
-        chunk_losses_fn = (
-            _copula_chunk_losses
-            if default_timing == "copula"
-            else _frailty_chunk_losses
-        )
-
-        total_losses = np.empty(n_simulations)
-        sector_loss_mat = np.zeros((n_simulations, n_sectors))
-        for start in range(0, n_simulations, chunk):
-            stop = min(start + chunk, n_simulations)
-            chunk_losses = chunk_losses_fn(stop - start)
-            total_losses[start:stop] = chunk_losses.sum(axis=1)
-            for s, cols in enumerate(sector_asset_cols):
-                if cols.size:
-                    sector_loss_mat[start:stop, s] = chunk_losses[:, cols].sum(axis=1)
-            del chunk_losses
-
-        sector_losses: Dict[str, np.ndarray] = {
-            sector: sector_loss_mat[:, s_idx]
-            for s_idx, sector in enumerate(self.sector_names)
-        }
-
-        def calculate_stats(loss_arr: np.ndarray) -> Dict[str, float]:
-            p95, p99, p999 = np.percentile(loss_arr, [95, 99, 99.9])
-            return {
-                "mean": float(np.mean(loss_arr)),
-                "std_dev": float(np.std(loss_arr)),
-                "var_95": float(p95),
-                "var_99": float(p99),
-                "var_999": float(p999),
-                "expected_shortfall_95": float(np.mean(loss_arr[loss_arr >= p95])),
-                "expected_shortfall_99": float(np.mean(loss_arr[loss_arr >= p99])),
-                "max_loss": float(np.max(loss_arr)),
-            }
-
-        return {
-            "portfolio_statistics": calculate_stats(total_losses),
-            "sector_statistics": {
-                s: calculate_stats(loss) for s, loss in sector_losses.items()
-            },
-        }
 
     def get_portfolio_summary(self) -> Dict[str, Any]:
         """Get summary statistics of the portfolio."""

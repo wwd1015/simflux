@@ -1,9 +1,11 @@
 """Centralized Rust backend detection and access."""
 
-from typing import Optional
+from typing import Optional, TypeVar
 
 # Shared tolerance for correlation matrix validation across Python and Rust.
 CORRELATION_TOLERANCE = 1e-8
+
+T = TypeVar("T")
 
 
 class Backend:
@@ -34,6 +36,18 @@ class Backend:
         """Return the ``_rust`` extension module, or ``None``."""
         cls.is_available()
         return cls._rust
+
+    @classmethod
+    def choose(cls, rust: T, numpy: T) -> T:
+        """Return ``rust`` when the Rust extension is active, else ``numpy``.
+
+        The single backend-dispatch decision.  Callers pass the two adapters for
+        one operation (a bound method, callable, or object) and receive the active
+        one, instead of open-coding ``if Backend.is_available()`` at each call
+        site.  Resolution is per call, so patching ``is_available`` (as the tests
+        do) still flips the backend after construction.
+        """
+        return rust if cls.is_available() else numpy
 
     @classmethod
     def force(cls, use_rust: bool) -> None:

@@ -6,6 +6,31 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-06-07
+
+### Changed
+
+- **Internal architecture (no public-API or numerical change).** Three deepening
+  refactors from an architecture review:
+  - **NumPy portfolio simulation extracted to its own module.**
+    `TwoFactorPortfolio` no longer carries the ~280-line NumPy fallback inline;
+    it lives in `portfolio/numpy_simulation.py` as a pure
+    `simulate_portfolio_numpy(...)`, testable directly. `two_factor_model.py`
+    drops from 1083 to 881 lines.
+  - **One backend-dispatch seam.** Added `Backend.choose(rust, numpy)`, the single
+    Rust-vs-NumPy decision; the four GBM engine entry points and the portfolio's
+    `simulate()` now resolve their adapter through it instead of open-coding
+    `if Backend.is_available()` at six sites. Resolution stays per call, so tests
+    that patch `Backend.is_available` are unaffected.
+  - **Shared parameter validators.** Each GBM-family parameter invariant
+    (`sigma>0`, `s0>0`, matching lengths, positive-definite correlation) is now
+    written once in `core/validation.py` and called from both the simulator
+    constructor and `SimulationEngine`, instead of being copy-pasted across the
+    two seams (GBM, CorrelatedGBM) or missing from the engine entirely
+    (the time-varying simulators). All four simulators now validate consistently
+    at both seams; the engine self-validates time-varying parameters for direct
+    calls, which it previously did not.
+
 ## [0.4.2] — 2026-06-05
 
 ### Changed
