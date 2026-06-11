@@ -44,8 +44,12 @@ The per-period default probability, `(cum[k] − cum[k−1]) / (1 − cum[k−1]
 limit of the frailty barrier.
 
 **Default timing model**:
-How multi-period default *timing* is generated (the `default_timing` argument).
-Two options, both reproducing the marginal cumulative PD exactly, differing only in
+How multi-period default *timing* is generated. Selected via the `default_timing`
+argument as a timing object (`Copula()`, `Frailty(persistence=...)`) or its string
+sugar (`"copula"`, `"frailty"` — resolved to default-configured objects). The model
+is a recipe: given the book's cumulative-PD matrix and loadings it produces the
+**timing plan** the backends consume. Two options, both reproducing the marginal
+cumulative PD exactly, differing only in
 the cross-period dependence of the systematic factor:
 - **Copula** (default): one latent draw per obligor for the whole horizon, compared
   against the *cumulative* PD staircase; default at first crossing (Li 2000). All
@@ -54,6 +58,26 @@ the cross-period dependence of the systematic factor:
   each period, and a per-period *calibrated barrier* preserving the marginal PD for
   any **factor persistence** (Duffie et al. 2009). `factor_persistence=0` ⇒
   independent periods; `=1` ⇒ frozen factor.
+
+**Timing plan**:
+The frozen artifact a default timing model derives for a given book: a
+`(n_periods, n_assets)` threshold matrix, the per-period AR(1) coefficient
+(`factor_phi`, exactly 0 for copula), and the **kernel** name. The *sole* timing
+input the simulation backends consume — backends never derive thresholds
+themselves. For copula the thresholds are the cumulative-PD staircase quantiles;
+for frailty they are the calibrated barriers.
+_Avoid_: "barriers" as the cross-seam term — calibrated barriers are the frailty
+implementation detail; the plan's thresholds cover both modes uniformly.
+
+**Kernel**:
+The simulation dynamic a backend runs against the timing plan's thresholds:
+`"copula"` (one frozen latent per obligor, first crossing, no fresh idiosyncratic
+shocks after t=0) or `"frailty"` (AR(1) systematic factor with fresh idiosyncratic
+shocks each period, first passage). A *closed two-member set*: a new kernel
+requires an inner loop in both backends plus cross-validation. Distinct from the
+default timing model, which is the user-facing recipe that derives the plan — two
+models may share a kernel (a custom calibration emitting `"frailty"` thresholds
+needs no backend change).
 
 **Factor persistence**:
 Annual autocorrelation of the systematic credit-cycle factor (frailty mode), in

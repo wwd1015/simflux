@@ -7,9 +7,9 @@ from math import sqrt
 from typing import List, Optional, Dict, Any, Union, TypedDict, NotRequired, cast
 from dataclasses import dataclass
 from ..core.base import BaseSimulator, SimulationConfig
-from ..core.backend import Backend, CORRELATION_TOLERANCE
+from ..core.backend import Backend
 from ..utils.storage import StorageConfig, ParquetResultsAnalyzer
-from ..utils.random_utils import validate_correlation_matrix_strict
+from ..utils.random_utils import CorrelationMatrix
 from .numpy_simulation import simulate_portfolio_numpy
 
 
@@ -293,9 +293,12 @@ class CreditPortfolio(BaseSimulator):
             systematic_lgd_correlation
         )
 
-        self.sector_correlation_matrix = self._prepare_sector_correlation_matrix(
+        self._sector_corr = self._prepare_sector_correlation_matrix(
             sector_correlation_matrix
         )
+        # Public read-only ndarray view; the validated value object is the
+        # internal currency (cached Cholesky, FFI marshalling).
+        self.sector_correlation_matrix = self._sector_corr.values
 
         self.validate_inputs()
 
@@ -360,23 +363,9 @@ class CreditPortfolio(BaseSimulator):
                     "All intra_sector_correlations must be between 0 and 1"
                 )
 
-        # Require positive-definiteness (not merely PSD): the Rust backend's
-        # Cholesky rejects a singular matrix, so admitting one here would make the
-        # two backends diverge (Rust raises, NumPy repairs). Validating PD up
-        # front keeps the seam backend-independent and matches CorrelatedGBM /
-        # TimeVaryingCorrelatedGBM, which also require PD.
-        validate_correlation_matrix_strict(
-            self.sector_correlation_matrix,
-            name="sector_correlation_matrix",
-            check_positive_definite=True,
-            pd_tolerance=CORRELATION_TOLERANCE,
-        )
-
-        if self.sector_correlation_matrix.shape != (
-            len(self.sector_names),
-            len(self.sector_names),
-        ):
-            raise ValueError("sector_correlation_matrix must match number of sectors")
+        # The sector correlation matrix invariants (symmetry, unit diagonal,
+        # bounds, strict positive-definiteness) are enforced once, by the
+        # CorrelationMatrix constructed in _prepare_sector_correlation_matrix.
 
         # Check that we have assets in each sector
         sector_counts: Dict[str, int] = {}
@@ -417,17 +406,27 @@ class CreditPortfolio(BaseSimulator):
 
     def _prepare_sector_correlation_matrix(
         self, matrix: Optional[Union[np.ndarray, List[List[float]]]]
-    ) -> np.ndarray:
-        """Return a valid sector correlation matrix."""
+    ) -> CorrelationMatrix:
+        """Build the validated sector correlation matrix value.
 
+        Requires strict positive-definiteness (not merely PSD): the Rust
+        backend's Cholesky rejects a singular matrix, so admitting one here
+        would make the two backends diverge (Rust raises, NumPy repairs).
+        Validating PD up front keeps the seam backend-independent and matches
+        CorrelatedGBM / TimeVaryingCorrelatedGBM, which also require PD.
+        """
         n_sectors = len(self.sector_names)
         if matrix is None:
-            return np.eye(n_sectors)
-
-        arr = np.asarray(matrix, dtype=float)
-        if arr.shape != (n_sectors, n_sectors):
-            raise ValueError("sector_correlation_matrix must match number of sectors")
-        return arr
+            arr = np.eye(n_sectors)
+        else:
+            arr = np.asarray(matrix, dtype=float)
+            if arr.shape != (n_sectors, n_sectors):
+                raise ValueError(
+                    "sector_correlation_matrix must match number of sectors"
+                )
+        return CorrelationMatrix(
+            arr, name="sector_correlation_matrix", check_positive_definite=True
+        )
 
     def simulate(
         self,

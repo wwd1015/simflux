@@ -1,7 +1,7 @@
 """Random number generation utilities and correlation matrix helpers."""
 
 import numpy as np
-from typing import List, Optional
+from typing import Dict, List, Optional
 import random
 
 from ..core.backend import CORRELATION_TOLERANCE
@@ -373,6 +373,103 @@ def validate_correlation_matrix_strict(
     else:
         if np.any(eigenvals < -pd_tolerance):
             raise ValueError(f"{name} must be positive semi-definite")
+
+
+def correlation_matrix_diagnostics(matrix: np.ndarray) -> Dict[str, bool]:
+    """Per-check boolean diagnostics over the same invariants as the strict
+    validator, sharing ``CORRELATION_TOLERANCE``.
+
+    The strict validator raises on the first failing invariant; this reports
+    every check independently, for inspection tools that want to show *which*
+    invariants hold.  ``positive_definite`` mirrors the strict validator's PD
+    branch (all eigenvalues above the shared tolerance).
+    """
+    m = np.asarray(matrix, dtype=float)
+    square = m.ndim == 2 and m.shape[0] == m.shape[1]
+    symmetric = square and bool(np.allclose(m, m.T, atol=CORRELATION_TOLERANCE))
+    diagonal_ones = square and bool(
+        np.allclose(np.diag(m), 1.0, atol=CORRELATION_TOLERANCE)
+    )
+    bounds_valid = square and bool(np.all(np.abs(m) <= 1.0 + CORRELATION_TOLERANCE))
+    positive_definite = square and bool(
+        np.all(np.linalg.eigvalsh(m) > CORRELATION_TOLERANCE)
+    )
+    return {
+        "is_symmetric": symmetric,
+        "diagonal_ones": diagonal_ones,
+        "bounds_valid": bounds_valid,
+        "positive_definite": positive_definite,
+        "structure_valid": bool(
+            symmetric and diagonal_ones and bounds_valid and positive_definite
+        ),
+    }
+
+
+class CorrelationMatrix:
+    """Validated correlation-matrix value — internal currency past a validation seam.
+
+    Construction runs :func:`validate_correlation_matrix_strict` exactly once
+    (shared ``CORRELATION_TOLERANCE``), so holding an instance *is* the proof of
+    validity: downstream code consumes it without re-checking, and the duplicated
+    hand-rolled symmetry/eigenvalue checks this replaces cannot drift to a
+    different tolerance.  The underlying array is a defensive read-only copy; the
+    sampling factor is computed lazily once via :func:`safe_cholesky` and cached.
+
+    This type does not appear in public signatures — public seams keep accepting
+    raw arrays/lists and construct it at their validation seam.
+    """
+
+    __slots__ = ("_matrix", "_name", "_factor")
+
+    def __init__(
+        self,
+        matrix: np.ndarray,
+        name: str = "correlation_matrix",
+        *,
+        check_positive_definite: bool = True,
+    ) -> None:
+        m = np.array(matrix, dtype=float, copy=True)
+        validate_correlation_matrix_strict(
+            m, name=name, check_positive_definite=check_positive_definite
+        )
+        m.setflags(write=False)
+        self._matrix = m
+        self._name = name
+        self._factor: Optional[np.ndarray] = None
+
+    @property
+    def values(self) -> np.ndarray:
+        """The validated matrix as a read-only ndarray."""
+        return self._matrix
+
+    @property
+    def n(self) -> int:
+        """Matrix dimension (number of correlated variables)."""
+        return self._matrix.shape[0]
+
+    def cholesky(self) -> np.ndarray:
+        """Sampling factor ``L`` with ``L @ L.T ≈ matrix`` (cached).
+
+        Delegates to :func:`safe_cholesky` — the single decompose-or-repair
+        primitive — so the repair policy and error mode stay in one place.
+        """
+        if self._factor is None:
+            self._factor = safe_cholesky(self._matrix, name=self._name)
+        return self._factor
+
+    def tolist(self) -> List[List[float]]:
+        """Nested-list form for the Rust FFI seam."""
+        return self._matrix.tolist()
+
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        # Lets np.asarray(cm) and ndarray-consuming code accept the value
+        # transparently; the underlying array stays read-only unless copied.
+        if dtype is not None:
+            return self._matrix.astype(dtype)
+        return self._matrix
+
+    def __repr__(self) -> str:
+        return f"CorrelationMatrix(n={self.n}, name={self._name!r})"
 
 
 def validate_correlation_matrix(
