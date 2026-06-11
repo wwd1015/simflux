@@ -6,6 +6,45 @@ contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Timing objects.** You can now select the default-timing model with an object
+  that carries its own configuration: `simulate(default_timing=Frailty(persistence=0.6))`
+  or `simulate(default_timing=Copula())`. Bad parameters fail at the line you
+  typed them (`Frailty(persistence=1.5)` raises immediately), and frailty-only
+  knobs no longer ride the `simulate()` signature for copula runs. The
+  `"copula"`/`"frailty"` strings still work as sugar for default-configured
+  objects. `Copula` and `Frailty` are exported at the top level.
+
+### Deprecated
+
+- **`factor_persistence` keyword.** Pass `default_timing=Frailty(persistence=...)`
+  instead. The keyword still works alongside the string sugar (with a
+  `DeprecationWarning`) and is rejected alongside a timing object so persistence
+  can never be specified twice. Note: an out-of-range `factor_persistence`
+  passed with `"copula"` now warns and is ignored rather than raising (it was
+  always ignored semantically).
+
+### For contributors
+
+- **Unified threshold plan.** The chosen timing model derives a frozen
+  `TimingPlan` (per-period, per-obligor threshold matrix + AR(1) coefficient)
+  once in Python; both backends consume it and neither derives thresholds
+  anymore — the duplicated cumulative-PD staircase in `src/portfolio.rs` and
+  `numpy_simulation.py` is deleted, so threshold parity holds by construction.
+  The private Rust FFI renamed `default_timing`→`kernel` and
+  `barriers`→`thresholds` (now required for both kernels, crossing as a NumPy
+  array). Rust copula numbers shift within numerical tolerance because one
+  quantile implementation now feeds both backends.
+- **One value each way at the portfolio backend seam.** `PortfolioInputs`
+  (self-validating) carries the whole adapter contract in;
+  `_complete_result()`, next to the `PortfolioResult` TypedDict, is the single
+  place result keys are written, pinned by a contract test.
+- **`CorrelationMatrix` value type.** Correlation-matrix invariants are checked
+  once, at construction, with the shared `CORRELATION_TOLERANCE`; instances
+  carry a cached `cholesky()`. The hand-rolled checks in
+  `TwoFactorCorrelationStructure` (literal `1e-8`s) are gone.
+
 ## [0.5.0] — 2026-06-08
 
 ### Added

@@ -210,10 +210,17 @@ results = portfolio.simulate(
 print(results["portfolio_statistics"]["var_99"])
 ```
 
+`default_timing` also accepts a timing object, which is where mode-specific
+configuration lives — `sf.Copula()` or `sf.Frailty(persistence=0.6)` (the annual
+autocorrelation of the credit-cycle factor, validated at construction). The
+strings are sugar for default-configured objects; the old `factor_persistence`
+keyword still works alongside the strings but is deprecated.
+
 The result keys are identical whether the Rust backend or the NumPy fallback ran:
 `portfolio_statistics`, `sector_statistics`, `n_trials`, `n_assets`, `n_sectors`,
-`sector_names`, `n_periods`, `period_length`, `time_horizon` (`analyzer` is added
-only when interim results are stored — see below). A `pd_term_structure` **longer**
+`sector_names`, `n_periods`, `period_length`, `time_horizon`, `default_timing`,
+`factor_persistence` (`analyzer` is added only when interim results are stored —
+see below). A `pd_term_structure` **longer**
 than `n_periods` runs a sub-horizon (the first `n_periods` points are used); a
 structure **shorter** than `n_periods` raises `RuntimeError`; with no term
 structure the flat `pd` is spread across periods at a constant hazard rate.
@@ -248,6 +255,13 @@ Topics covered:
 - Multi-period extension with conditional PD derivation
 - Convergence guidance for Monte Carlo simulations
 - Comparison with industry models (RiskFrontier, CreditMetrics, Basel IRB)
+
+More documentation lives in [`docs/`](docs/):
+- [User Guide](docs/user_guide.md) — task-oriented walkthroughs of every simulator
+- [System Design](docs/system_design.md) — module responsibilities and the backend seams
+- [Architecture Comparison](docs/architecture_comparison.md) — Rust backend vs NumPy fallback, flow by flow
+- [Performance Benchmarks](docs/performance_benchmarks.md) — measured speedups and memory
+- [Deployment Guide](docs/deployment_guide.md) — building and shipping wheels
 
 ## Installation from Pre-Built Wheels
 

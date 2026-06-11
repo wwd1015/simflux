@@ -138,7 +138,7 @@ Portfolio Loss = Σᵢ Lossᵢ
 
 The single-period model asks "does this asset default by horizon T?" The multi-period extension asks "does it default, and if so, **when**?"
 
-The horizon is divided into `n_periods` discrete intervals (e.g., 8 quarters for a 2-year horizon). SimFlux offers **two default-timing models** via `default_timing`, distinguished by how the systematic factor evolves across periods. **Both reproduce the marginal cumulative PD term structure exactly** — the input PDs are honored regardless of the dependence assumption — so they differ only in cross-period dependence, and therefore in the tail.
+The horizon is divided into `n_periods` discrete intervals (e.g., 8 quarters for a 2-year horizon). SimFlux offers **two default-timing models** via `default_timing` — selected as timing objects (`Copula()`, `Frailty(persistence=...)`) or their string sugar (`"copula"`, `"frailty"`) — distinguished by how the systematic factor evolves across periods. **Both reproduce the marginal cumulative PD term structure exactly** — the input PDs are honored regardless of the dependence assumption — so they differ only in cross-period dependence, and therefore in the tail. Either way, the chosen model derives a *timing plan* (the per-period, per-obligor threshold matrix) once in Python, and both the Rust backend and the NumPy fallback consume that same plan — neither backend derives thresholds itself.
 
 **`"copula"` (default) — one-factor Gaussian copula of default times (Li, 2000).**
 A single latent `V = √ρ·F + √(1−ρ)·ε` is drawn per obligor for the *whole* horizon and compared against the **cumulative** threshold staircase `τ_k = Φ⁻¹(cum_k)`. Default occurs at the first crossing, which gives both *whether* and *when*. Because there is one draw against a monotone staircase, `P(default by k) = Φ(τ_k) = cum_k` **exactly, for any correlation** — no independence assumption. All uncertainty resolves at t=0, so cross-period dependence is maximal and the loss distribution is **invariant to how finely the horizon is sliced** (slicing only re-labels timing).
@@ -159,7 +159,7 @@ Limits and a caveat:
 
 **Choosing.** `copula` is the credit-derivatives-standard default-time model, grid-invariant, and the safe default. `frailty` is the more realistic dynamic model when new shocks genuinely arrive over the horizon — at the cost of a calibrated persistence parameter and monitoring-frequency dependence. At `n_periods = 1` the two coincide.
 
-**Calibrating `factor_persistence`.** It is the annual autocorrelation of the systematic credit factor. Estimate it by probit-transforming an aggregate (or segment) default-rate series into a latent factor and fitting an AR(1); typical annual values are ~0.4–0.7. The default `0.5` is a cycle-realistic *illustrative* value for examples — production use should calibrate to data.
+**Calibrating the persistence.** `Frailty(persistence=...)` is the annual autocorrelation of the systematic credit factor (the deprecated `factor_persistence` keyword sets the same parameter). Estimate it by probit-transforming an aggregate (or segment) default-rate series into a latent factor and fitting an AR(1); typical annual values are ~0.4–0.7. The default `0.5` is a cycle-realistic *illustrative* value for examples — production use should calibrate to data.
 
 For each model, the per-period inputs are derived as follows.
 
