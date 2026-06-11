@@ -10,7 +10,8 @@ from ..core.base import BaseSimulator, SimulationConfig
 from ..core.backend import Backend
 from ..utils.storage import StorageConfig, ParquetResultsAnalyzer
 from ..utils.random_utils import CorrelationMatrix
-from .default_timing import DefaultTiming, TimingPlan, resolve_timing
+from .default_timing import DefaultTiming, resolve_timing
+from .inputs import PortfolioInputs
 from .numpy_simulation import simulate_portfolio_numpy
 
 
@@ -194,6 +195,40 @@ class PortfolioResult(TypedDict):
     default_timing: str
     factor_persistence: Optional[float]
     analyzer: NotRequired[ParquetResultsAnalyzer]
+
+
+def _complete_result(
+    backend_results: Dict[str, Any],
+    *,
+    inputs: PortfolioInputs,
+    timing: DefaultTiming,
+) -> PortfolioResult:
+    """Complete the :class:`PortfolioResult` contract — THE one place result
+    keys are written.
+
+    Both backends return only their statistics keys; everything else is stamped
+    here, uniformly, so the key set cannot depend on which backend ran (and
+    ``n_trials`` can never go missing on the NumPy fallback).  The timing model
+    stamps its own keys.  Lives next to the TypedDict so the contract and its
+    construction cannot drift apart; a contract test pins the emitted keys
+    against ``PortfolioResult.__annotations__``.
+    """
+    results = dict(backend_results)
+    results["n_trials"] = inputs.n_simulations
+    results["n_assets"] = len(inputs.assets)
+    results["n_sectors"] = len(inputs.sector_names)
+    results["sector_names"] = inputs.sector_names
+    results["n_periods"] = inputs.n_periods
+    results["period_length"] = inputs.period_length
+    results["time_horizon"] = inputs.n_periods * inputs.period_length
+    results.update(timing.stamp())
+
+    # The only storage-conditional key: present when interim results were
+    # actually persisted (Rust-only feature).
+    if inputs.store_interim and inputs.output_path and Backend.is_available():
+        results["analyzer"] = ParquetResultsAnalyzer(inputs.output_path)
+
+    return cast(PortfolioResult, results)
 
 
 class CreditPortfolio(BaseSimulator):
@@ -544,58 +579,65 @@ class CreditPortfolio(BaseSimulator):
                 UserWarning,
             )
 
-        # Derive the timing plan exactly once, shared by whichever backend runs.
-        # The plan is the sole timing input the backends consume (thresholds for
-        # both kernels — staircase quantiles for copula, calibrated barriers for
-        # frailty — derived from the same per-obligor loadings each backend
-        # simulates on), so threshold parity holds by construction.
+        # Assemble the backend seam's whole contract exactly once: the timing
+        # plan (the sole timing input — thresholds for both kernels, derived
+        # from the same per-obligor loadings each backend simulates on, so
+        # threshold parity holds by construction), the per-obligor arrays, and
+        # the run/storage parameters.  Both adapters take this one value.
+        inputs = self._build_inputs(
+            timing=timing,
+            n_simulations=n_simulations,
+            n_periods=n_periods,
+            period_length=period_length,
+            storage_config=storage_config,
+        )
+
+        # One dispatch seam, shared with the GBM engine: pick the active backend
+        # adapter (Rust or NumPy) and run it.
+        run = Backend.choose(
+            self._simulate_portfolio_rust, self._simulate_portfolio_numpy
+        )
+        backend_results = run(inputs)
+
+        # Both adapters return only their statistics keys; _complete_result is
+        # the single place the rest of the contract is written.
+        return _complete_result(backend_results, inputs=inputs, timing=timing)
+
+    def _build_inputs(
+        self,
+        *,
+        timing: DefaultTiming,
+        n_simulations: int,
+        n_periods: int,
+        period_length: float,
+        storage_config: Optional[StorageConfig] = None,
+    ) -> PortfolioInputs:
+        """Assemble the backend seam's input contract for one run."""
         plan = timing.plan(
             cumulative_pds=self._get_cumulative_pds_by_period(n_periods),
             intra_correlations=np.asarray(self.asset_intra_correlations),
             period_length=period_length,
         )
-
-        store_interim = storage_config.store_interim if storage_config else False
-        output_path = storage_config.output_path if storage_config else None
-        batch_size = storage_config.batch_size if storage_config else None
-
-        # One dispatch seam, shared with the GBM engine: pick the active backend
-        # adapter (Rust or NumPy) and run it. Both adapters take the same keyword
-        # contract and return the same key set.
-        run = Backend.choose(
-            self._simulate_portfolio_rust, self._simulate_portfolio_numpy
-        )
-        results = run(
+        return PortfolioInputs(
+            config=self.config,
+            assets=self.assets,
+            sector_names=self.sector_names,
+            sector_correlation=self._sector_corr,
+            intra_sector_correlations=self.intra_sector_correlations,
+            systematic_lgd_correlations=self.systematic_lgd_correlations,
+            asset_intra_correlations=np.asarray(self.asset_intra_correlations),
+            asset_sector_ids=np.array([a.sector_id for a in self.assets]),
+            asset_lgd_stds=np.array([a.lgd_std for a in self.assets]),
+            asset_exposures=np.array([a.exposure for a in self.assets]),
+            lgd_means_by_period=self._get_lgd_means_by_period(n_periods),
             n_simulations=n_simulations,
             n_periods=n_periods,
             period_length=period_length,
             plan=plan,
-            store_interim=store_interim,
-            output_path=output_path,
-            batch_size=batch_size,
+            store_interim=storage_config.store_interim if storage_config else False,
+            output_path=storage_config.output_path if storage_config else None,
+            batch_size=storage_config.batch_size if storage_config else None,
         )
-
-        # Stamp the result contract uniformly so both backends return the same
-        # key set regardless of install state (see PortfolioResult).  n_trials is
-        # stamped here rather than read from a backend dict so it can never go
-        # missing on the NumPy fallback.
-        results["n_trials"] = n_simulations
-        results["n_assets"] = len(self.assets)
-        results["n_sectors"] = len(self.sector_names)
-        results["sector_names"] = self.sector_names
-        results["n_periods"] = n_periods
-        results["period_length"] = period_length
-        results["time_horizon"] = n_periods * period_length
-        # The mode stamps its own keys (default_timing / factor_persistence).
-        results.update(timing.stamp())
-
-        # Create analyzer if interim data is available
-        if store_interim and output_path and Backend.is_available():
-            results["analyzer"] = ParquetResultsAnalyzer(output_path)
-
-        # Both adapters return a bare dict; the stamping above completes the
-        # PortfolioResult contract, so the cast is honest.
-        return cast(PortfolioResult, results)
 
     def _convert_asset_to_rust(self, asset: AssetData) -> Any:
         """Convert Python AssetData to Rust AssetData."""
@@ -617,94 +659,63 @@ class CreditPortfolio(BaseSimulator):
     # Backend adapters (selected by Backend.choose in simulate)
     # ------------------------------------------------------------------
 
-    def _simulate_portfolio_rust(
-        self,
-        *,
-        n_simulations: int,
-        n_periods: int,
-        period_length: float,
-        plan: TimingPlan,
-        store_interim: bool,
-        output_path: Optional[str],
-        batch_size: Optional[int],
-    ) -> Dict[str, Any]:
+    def _simulate_portfolio_rust(self, inputs: PortfolioInputs) -> Dict[str, Any]:
         """Run the simulation on the Rust backend.
 
-        The timing plan flattens to primitives at the FFI: the kernel name, the
-        per-period AR(1) coefficient, and the threshold matrix (transposed to the
-        per-asset row orientation the trial loop indexes, crossing as a NumPy
-        array rather than nested lists to avoid boxing every threshold).
+        The inputs flatten to primitives at the FFI: the timing plan crosses as
+        the kernel name, the per-period AR(1) coefficient, and the threshold
+        matrix (transposed to the per-asset row orientation the trial loop
+        indexes, crossing as a NumPy array rather than nested lists to avoid
+        boxing every threshold).
         """
         _rust = Backend.get_rust()
-        rust_assets = [self._convert_asset_to_rust(asset) for asset in self.assets]
+        rust_assets = [self._convert_asset_to_rust(asset) for asset in inputs.assets]
 
         # The full sector correlation matrix is the single source of truth for
         # cross-sector coupling; no scalar summary rides the seam.
         rust_config = _rust.PortfolioConfig(
-            intra_sector_correlations=self.intra_sector_correlations,
-            systematic_lgd_correlations=self.systematic_lgd_correlations,
-            sector_names=self.sector_names,
-            sector_correlation_matrix=self._sector_corr.tolist(),
+            intra_sector_correlations=inputs.intra_sector_correlations,
+            systematic_lgd_correlations=inputs.systematic_lgd_correlations,
+            sector_names=inputs.sector_names,
+            sector_correlation_matrix=inputs.sector_correlation.tolist(),
         )
 
         try:
             return _rust.simulate_portfolio(
                 config=rust_config,
                 assets=rust_assets,
-                n_simulations=n_simulations,
-                kernel=plan.kernel,
-                factor_phi=plan.factor_phi,
-                thresholds=np.ascontiguousarray(plan.thresholds.T),
-                n_periods=n_periods,
-                period_length=period_length,
-                seed=self.config.seed,
-                store_interim=store_interim,
-                output_path=output_path,
-                batch_size=batch_size,
+                n_simulations=inputs.n_simulations,
+                kernel=inputs.plan.kernel,
+                factor_phi=inputs.plan.factor_phi,
+                thresholds=np.ascontiguousarray(inputs.plan.thresholds.T),
+                n_periods=inputs.n_periods,
+                period_length=inputs.period_length,
+                seed=inputs.config.seed,
+                store_interim=inputs.store_interim,
+                output_path=inputs.output_path,
+                batch_size=inputs.batch_size,
             )
         except RuntimeError as exc:
-            if store_interim:
+            if inputs.store_interim:
                 raise RuntimeError(
                     "Interim storage via the Rust backend is not available; disable "
                     "store_interim or run in Python fallback mode."
                 ) from exc
             raise
 
-    def _simulate_portfolio_numpy(
-        self,
-        *,
-        n_simulations: int,
-        n_periods: int,
-        period_length: float,
-        plan: TimingPlan,
-        store_interim: bool,
-        output_path: Optional[str],
-        batch_size: Optional[int],
-    ) -> Dict[str, Any]:
+    def _simulate_portfolio_numpy(self, inputs: PortfolioInputs) -> Dict[str, Any]:
         """Run the simulation on the NumPy fallback adapter.
 
-        Resolves the model's per-obligor arrays and delegates to
-        :func:`simflux.portfolio.numpy_simulation.simulate_portfolio_numpy`.
-        Interim storage is Rust-only, so it is not honored here.
+        Delegates to :func:`simflux.portfolio.numpy_simulation.simulate_portfolio_numpy`,
+        which consumes the same inputs value.  Interim storage is Rust-only, so
+        it is not honored here.
         """
-        if store_interim:
+        if inputs.store_interim:
             warnings.warn(
                 "Interim storage requires the Rust backend; proceeding without persistence.",
                 RuntimeWarning,
             )
-        return simulate_portfolio_numpy(
-            config=self.config,
-            sector_correlation_matrix=self.sector_correlation_matrix,
-            asset_intra_correlations=np.array(self.asset_intra_correlations),
-            systematic_lgd_correlations=self.systematic_lgd_correlations,
-            sector_names=self.sector_names,
-            asset_sector_ids=np.array([a.sector_id for a in self.assets]),
-            lgd_means_by_period=self._get_lgd_means_by_period(n_periods),
-            asset_lgd_stds=np.array([a.lgd_std for a in self.assets]),
-            asset_exposures=np.array([a.exposure for a in self.assets]),
-            n_simulations=n_simulations,
-            plan=plan,
-        )
+        return simulate_portfolio_numpy(inputs)
 
     # ------------------------------------------------------------------
     # Conditional PD helpers (used by frailty barrier calibration)

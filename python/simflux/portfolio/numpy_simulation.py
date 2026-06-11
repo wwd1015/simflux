@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import warnings
 from math import erf
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional
 
 import numpy as np
 
-from ..core.base import SimulationConfig, check_memory
-from ..utils.random_utils import safe_cholesky
-from .default_timing import TimingPlan
+from ..core.base import check_memory
+from .inputs import PortfolioInputs
 
 # Max f64 elements in one dense (chunk, n_assets) scratch array. The reduction
 # below summarizes each chunk of simulations, so this caps peak scratch instead
@@ -41,30 +40,27 @@ from .default_timing import TimingPlan
 FALLBACK_CHUNK_ELEMENTS = 32_768
 
 
-def simulate_portfolio_numpy(
-    *,
-    config: SimulationConfig,
-    sector_correlation_matrix: np.ndarray,
-    asset_intra_correlations: np.ndarray,
-    systematic_lgd_correlations: Sequence[float],
-    sector_names: Sequence[str],
-    asset_sector_ids: np.ndarray,
-    lgd_means_by_period: np.ndarray,
-    asset_lgd_stds: np.ndarray,
-    asset_exposures: np.ndarray,
-    n_simulations: int,
-    plan: TimingPlan,
-) -> Dict[str, Any]:
+def simulate_portfolio_numpy(inputs: PortfolioInputs) -> Dict[str, Any]:
     """Run the portfolio loss simulation in vectorized NumPy.
 
-    ``plan`` is the timing plan derived by the default timing model — the sole
-    timing input: this adapter never derives thresholds, it only selects the
-    simulation kernel the plan names and compares latents against
-    ``plan.thresholds``.  ``lgd_means_by_period`` is ``(n_periods, n_assets)``
-    (the obligor's LGD Beta mean by period end) and must match the plan's
-    period count.  Returns ``{"portfolio_statistics", "sector_statistics"}``;
-    the caller stamps the rest of the :class:`PortfolioResult` contract.
+    ``inputs`` is the backend seam's whole contract — the same value the Rust
+    adapter consumes, validated at construction (shapes, plan/period
+    consistency).  Its timing plan is the sole timing input: this adapter never
+    derives thresholds, it only selects the simulation kernel the plan names
+    and compares latents against ``plan.thresholds``.  Returns
+    ``{"portfolio_statistics", "sector_statistics"}``; the caller completes the
+    :class:`PortfolioResult` contract (one stamping site, next to the TypedDict).
     """
+    config = inputs.config
+    sector_names = inputs.sector_names
+    asset_intra_correlations = inputs.asset_intra_correlations
+    systematic_lgd_correlations = inputs.systematic_lgd_correlations
+    asset_sector_ids = inputs.asset_sector_ids
+    lgd_means_by_period = inputs.lgd_means_by_period
+    asset_lgd_stds = inputs.asset_lgd_stds
+    asset_exposures = inputs.asset_exposures
+    n_simulations = inputs.n_simulations
+    plan = inputs.plan
     n_periods = plan.n_periods
     try:
         from scipy import stats as scipy_stats
@@ -102,9 +98,9 @@ def simulate_portfolio_numpy(
     # with n_assets * n_simulations.
     check_memory(config, n_simulations * (n_sectors + 1) + 8 * FALLBACK_CHUNK_ELEMENTS)
 
-    sector_cholesky = safe_cholesky(
-        sector_correlation_matrix, name="sector_correlation_matrix"
-    )
+    # The validated CorrelationMatrix value carries its own (cached) sampling
+    # factor — no raw decomposition at this seam.
+    sector_cholesky = inputs.sector_correlation.cholesky()
 
     asset_sector_ids = np.asarray(asset_sector_ids)
     asset_lgd_stds = np.asarray(asset_lgd_stds)
@@ -205,12 +201,8 @@ def simulate_portfolio_numpy(
         return _inv_beta(lgd_uniform, alpha, beta)
 
     # Per-period thresholds come from the timing plan for BOTH kernels — the
-    # staircase/barrier derivation lives in default_timing, not here.
-    if lgd_means_by_period.shape != plan.thresholds.shape:
-        raise ValueError(
-            f"lgd_means_by_period shape {lgd_means_by_period.shape} must match "
-            f"the timing plan's thresholds shape {plan.thresholds.shape}"
-        )
+    # staircase/barrier derivation lives in default_timing, not here, and the
+    # plan/LGD shape consistency was validated by PortfolioInputs.
     thresholds_by_period = plan.thresholds
     asset_cols = np.arange(n_assets)
 

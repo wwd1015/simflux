@@ -101,20 +101,13 @@ def _build_call(spec: Dict):
             return lambda: portfolio.simulate(n_simulations=spec["n_simulations"])
         # Exercise the NumPy adapter directly (single-period copula default), so the
         # benchmark measures the fallback compute, not the dispatch.
-        plan = sf.Copula().plan(
-            cumulative_pds=portfolio._get_cumulative_pds_by_period(1),
-            intra_correlations=np.asarray(portfolio.asset_intra_correlations),
-            period_length=1.0,
-        )
-        return lambda: portfolio._simulate_portfolio_numpy(
+        inputs = portfolio._build_inputs(
+            timing=sf.Copula(),
             n_simulations=spec["n_simulations"],
             n_periods=1,
             period_length=1.0,
-            plan=plan,
-            store_interim=False,
-            output_path=None,
-            batch_size=None,
         )
+        return lambda: portfolio._simulate_portfolio_numpy(inputs)
 
     raise ValueError(f"unknown test {test!r}")
 

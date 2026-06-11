@@ -1,5 +1,7 @@
 """Tests for portfolio simulation functionality."""
 
+import warnings
+
 import pytest
 import numpy as np
 import pandas as pd
@@ -336,6 +338,30 @@ class TestCreditPortfolio:
         results = portfolio.simulate(n_simulations=10)
         assert 'portfolio_statistics' in results
         assert 'sector_statistics' in results
+
+    def test_result_contract_complete_and_exact(self):
+        """The emitted key set IS the PortfolioResult contract: every annotated
+        key present (analyzer is the only storage-conditional one) and no
+        unannotated keys, on both backends."""
+        from simflux.portfolio.two_factor_model import PortfolioResult
+
+        contract = set(PortfolioResult.__annotations__)
+        assets = self.create_sample_assets()
+
+        def run_numpy():
+            with patch.object(sf.core.backend.Backend, 'is_available', return_value=False), \
+                 patch.object(sf.core.backend.Backend, 'get_rust', return_value=None), \
+                 warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return sf.CreditPortfolio(assets=assets).simulate(n_simulations=10)
+
+        for results in filter(None, [
+            run_numpy(),
+            sf.CreditPortfolio(assets=assets).simulate(n_simulations=10)
+            if sf.Backend.is_available() else None,
+        ]):
+            assert set(results) >= contract - {"analyzer"}
+            assert set(results) <= contract
 
 
 class TestStorageConfig:
