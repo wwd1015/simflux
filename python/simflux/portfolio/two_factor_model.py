@@ -10,6 +10,7 @@ from ..core.base import BaseSimulator, SimulationConfig
 from ..core.backend import Backend
 from ..utils.storage import StorageConfig, ParquetResultsAnalyzer
 from ..utils.random_utils import CorrelationMatrix
+from .default_timing import DefaultTiming, TimingPlan, resolve_timing
 from .numpy_simulation import simulate_portfolio_numpy
 
 
@@ -433,8 +434,8 @@ class CreditPortfolio(BaseSimulator):
         n_simulations: int,
         n_periods: int = 1,
         period_length: float = 1.0,
-        default_timing: str = "copula",
-        factor_persistence: float = 0.5,
+        default_timing: Union[str, DefaultTiming] = "copula",
+        factor_persistence: Optional[float] = None,
         storage_config: Optional[StorageConfig] = None,
     ) -> "PortfolioResult":
         """
@@ -453,12 +454,14 @@ class CreditPortfolio(BaseSimulator):
             Length of each period in years.  ``period_length=0.25`` for
             quarterly steps.  The total time horizon is
             ``n_periods * period_length``.
-        default_timing : {"copula", "frailty"}, default="copula"
-            How default *timing* is generated across periods (no effect when
-            ``n_periods == 1``, where the two coincide).  Both reproduce the
-            marginal cumulative PD term structure exactly; they differ in the
-            cross-period dependence of the systematic factor, and therefore in
-            the tail.
+        default_timing : Copula, Frailty, or {"copula", "frailty"}, default="copula"
+            The default timing model — how default *timing* is generated across
+            periods (no effect when ``n_periods == 1``, where the two coincide).
+            Pass a timing object (``Copula()``, ``Frailty(persistence=0.5)``) or
+            its string sugar, which resolves to a default-configured object.
+            Both reproduce the marginal cumulative PD term structure exactly;
+            they differ in the cross-period dependence of the systematic factor,
+            and therefore in the tail.
 
             * ``"copula"`` — one-factor Gaussian copula of default *times*
               (Li, 2000).  A single latent ``V = sqrt(rho)*F + sqrt(1-rho)*eps``
@@ -476,14 +479,12 @@ class CreditPortfolio(BaseSimulator):
               = 0`` reduces to independent periods; ``= 1`` freezes the factor.
 
             See methodology §2.6.
-        factor_persistence : float, default=0.5
-            **Frailty mode only.** Annual autocorrelation of the systematic
-            credit-cycle factor, in ``[0, 1]``; the per-period AR(1) coefficient
-            is ``factor_persistence ** period_length``.  The default ``0.5`` is a
-            cycle-realistic *illustrative* value — for production use, calibrate
-            it to data (e.g. an AR(1) fit to a probit-transformed default-rate
-            series); typical annual estimates are ~0.4–0.7.  Ignored by
-            ``"copula"``.
+        factor_persistence : float, optional
+            **Deprecated** — pass ``default_timing=Frailty(persistence=...)``
+            instead.  Honored (with a ``DeprecationWarning``) only alongside
+            string sugar; rejected alongside a timing object so persistence can
+            never be specified twice.  See :class:`Frailty` for the parameter's
+            meaning and calibration guidance.
         storage_config : StorageConfig, optional
             Configuration for storing interim results.
 
@@ -506,10 +507,9 @@ class CreditPortfolio(BaseSimulator):
             raise ValueError("n_periods must be positive")
         if period_length <= 0:
             raise ValueError("period_length must be positive")
-        if default_timing not in ("copula", "frailty"):
-            raise ValueError("default_timing must be 'copula' or 'frailty'")
-        if not 0.0 <= factor_persistence <= 1.0:
-            raise ValueError("factor_persistence must be between 0 and 1")
+        # Resolve string sugar first so a bad mode fails before any work; the
+        # timing object validates its own parameters at construction.
+        timing = resolve_timing(default_timing, factor_persistence=factor_persistence)
 
         # A pd_term_structure longer than n_periods is a valid *sub-horizon* run:
         # the simulation walks the first n_periods points of the curve, so a
@@ -544,25 +544,16 @@ class CreditPortfolio(BaseSimulator):
                 UserWarning,
             )
 
-        # Frailty mode: calibrate the per-period default barriers up front (once,
-        # shared by whichever backend runs) so the marginal PD is preserved.
-        factor_phi = 0.0
-        barriers = None
-        if default_timing == "frailty":
-            from .frailty import per_period_phi, barrier_matrix
-
-            factor_phi = (
-                per_period_phi(factor_persistence, period_length)
-                if n_periods > 1
-                else 0.0
-            )
-            cum_matrix = np.stack(
-                [self._get_cumulative_pds(k, n_periods) for k in range(n_periods)]
-            )
-            # Per-obligor rho_i (heterogeneous loadings allowed), so the frailty
-            # barrier is calibrated with the same loading each backend simulates on.
-            asset_rhos = np.array(self.asset_intra_correlations)
-            barriers = barrier_matrix(cum_matrix, asset_rhos, factor_phi)
+        # Derive the timing plan exactly once, shared by whichever backend runs.
+        # The plan is the sole timing input the backends consume (thresholds for
+        # both kernels — staircase quantiles for copula, calibrated barriers for
+        # frailty — derived from the same per-obligor loadings each backend
+        # simulates on), so threshold parity holds by construction.
+        plan = timing.plan(
+            cumulative_pds=self._get_cumulative_pds_by_period(n_periods),
+            intra_correlations=np.asarray(self.asset_intra_correlations),
+            period_length=period_length,
+        )
 
         store_interim = storage_config.store_interim if storage_config else False
         output_path = storage_config.output_path if storage_config else None
@@ -578,9 +569,7 @@ class CreditPortfolio(BaseSimulator):
             n_simulations=n_simulations,
             n_periods=n_periods,
             period_length=period_length,
-            default_timing=default_timing,
-            factor_phi=factor_phi,
-            barriers=barriers,
+            plan=plan,
             store_interim=store_interim,
             output_path=output_path,
             batch_size=batch_size,
@@ -597,10 +586,8 @@ class CreditPortfolio(BaseSimulator):
         results["n_periods"] = n_periods
         results["period_length"] = period_length
         results["time_horizon"] = n_periods * period_length
-        results["default_timing"] = default_timing
-        results["factor_persistence"] = (
-            factor_persistence if default_timing == "frailty" else None
-        )
+        # The mode stamps its own keys (default_timing / factor_persistence).
+        results.update(timing.stamp())
 
         # Create analyzer if interim data is available
         if store_interim and output_path and Backend.is_available():
@@ -636,14 +623,18 @@ class CreditPortfolio(BaseSimulator):
         n_simulations: int,
         n_periods: int,
         period_length: float,
-        default_timing: str,
-        factor_phi: float,
-        barriers: Optional[np.ndarray],
+        plan: TimingPlan,
         store_interim: bool,
         output_path: Optional[str],
         batch_size: Optional[int],
     ) -> Dict[str, Any]:
-        """Run the simulation on the Rust backend."""
+        """Run the simulation on the Rust backend.
+
+        The timing plan flattens to primitives at the FFI: the kernel name, the
+        per-period AR(1) coefficient, and the threshold matrix (transposed to the
+        per-asset row orientation the trial loop indexes, crossing as a NumPy
+        array rather than nested lists to avoid boxing every threshold).
+        """
         _rust = Backend.get_rust()
         rust_assets = [self._convert_asset_to_rust(asset) for asset in self.assets]
 
@@ -653,7 +644,7 @@ class CreditPortfolio(BaseSimulator):
             intra_sector_correlations=self.intra_sector_correlations,
             systematic_lgd_correlations=self.systematic_lgd_correlations,
             sector_names=self.sector_names,
-            sector_correlation_matrix=self.sector_correlation_matrix.tolist(),
+            sector_correlation_matrix=self._sector_corr.tolist(),
         )
 
         try:
@@ -661,11 +652,11 @@ class CreditPortfolio(BaseSimulator):
                 config=rust_config,
                 assets=rust_assets,
                 n_simulations=n_simulations,
+                kernel=plan.kernel,
+                factor_phi=plan.factor_phi,
+                thresholds=np.ascontiguousarray(plan.thresholds.T),
                 n_periods=n_periods,
                 period_length=period_length,
-                default_timing=default_timing,
-                factor_phi=factor_phi,
-                barriers=(barriers.T.tolist() if barriers is not None else []),
                 seed=self.config.seed,
                 store_interim=store_interim,
                 output_path=output_path,
@@ -685,9 +676,7 @@ class CreditPortfolio(BaseSimulator):
         n_simulations: int,
         n_periods: int,
         period_length: float,
-        default_timing: str,
-        factor_phi: float,
-        barriers: Optional[np.ndarray],
+        plan: TimingPlan,
         store_interim: bool,
         output_path: Optional[str],
         batch_size: Optional[int],
@@ -713,12 +702,8 @@ class CreditPortfolio(BaseSimulator):
             lgd_means_by_period=self._get_lgd_means_by_period(n_periods),
             asset_lgd_stds=np.array([a.lgd_std for a in self.assets]),
             asset_exposures=np.array([a.exposure for a in self.assets]),
-            cumulative_pds_by_period=self._get_cumulative_pds_by_period(n_periods),
             n_simulations=n_simulations,
-            n_periods=n_periods,
-            default_timing=default_timing,
-            factor_phi=factor_phi,
-            barriers=barriers,
+            plan=plan,
         )
 
     # ------------------------------------------------------------------

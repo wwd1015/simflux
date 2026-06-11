@@ -9,7 +9,7 @@
 #![allow(clippy::unwrap_or_default)]
 #![allow(deprecated)]
 
-use numpy::{IntoPyArray, PyArray2, PyArray3};
+use numpy::{IntoPyArray, PyArray2, PyArray3, PyReadonlyArray2};
 use pyo3::prelude::*;
 
 pub mod correlation;
@@ -184,31 +184,41 @@ fn py_simulate_gbm_time_varying_correlated<'py>(
 }
 
 #[pyfunction]
-#[pyo3(name = "simulate_portfolio", signature = (config, assets, n_simulations, n_periods=1, period_length=1.0, default_timing="copula".to_string(), factor_phi=0.0, barriers=Vec::new(), seed=None, store_interim=None, output_path=None, batch_size=None))]
+#[pyo3(name = "simulate_portfolio", signature = (config, assets, n_simulations, kernel, factor_phi, thresholds, n_periods=1, period_length=1.0, seed=None, store_interim=None, output_path=None, batch_size=None))]
 fn py_simulate_portfolio(
     py: Python<'_>,
     config: PortfolioConfig,
     assets: Vec<AssetData>,
     n_simulations: usize,
+    kernel: String,
+    factor_phi: f64,
+    thresholds: PyReadonlyArray2<f64>,
     n_periods: usize,
     period_length: f64,
-    default_timing: String,
-    factor_phi: f64,
-    barriers: Vec<Vec<f64>>,
     seed: Option<u64>,
     store_interim: Option<bool>,
     output_path: Option<String>,
     batch_size: Option<usize>,
 ) -> PyResult<PyObject> {
+    // The timing plan crosses the FFI as a NumPy array ([asset][period]) to
+    // avoid boxing every threshold; rebuild the per-asset rows the trial loop
+    // indexes. The plan is REQUIRED for both kernels — the Rust backend never
+    // derives thresholds (see python/simflux/portfolio/default_timing.py).
+    let thresholds_view = thresholds.as_array();
+    let thresholds: Vec<Vec<f64>> = thresholds_view
+        .outer_iter()
+        .map(|row| row.to_vec())
+        .collect();
+
     let results = simulate_portfolio_losses(
         &config,
         &assets,
         n_simulations,
         n_periods,
         period_length,
-        &default_timing,
+        &kernel,
         factor_phi,
-        &barriers,
+        &thresholds,
         seed,
         store_interim.unwrap_or(false),
         output_path,

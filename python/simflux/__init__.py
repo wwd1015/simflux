@@ -13,6 +13,7 @@ from .processes.gbm import GBM, CorrelatedGBM
 from .processes.time_varying import TimeVaryingGBM, TimeVaryingCorrelatedGBM
 from .portfolio.two_factor_model import CreditPortfolio, AssetData
 from .portfolio.correlation import TwoFactorCorrelationStructure
+from .portfolio.default_timing import Copula, Frailty
 from .utils.storage import StorageConfig, ParquetResultsAnalyzer
 from .utils.random_utils import set_seed
 from .core.engine import SimulationEngine
@@ -32,6 +33,8 @@ __all__ = [
     "CreditPortfolio",
     "AssetData",
     "TwoFactorCorrelationStructure",
+    "Copula",
+    "Frailty",
     # Storage and utilities
     "StorageConfig",
     "ParquetResultsAnalyzer",
