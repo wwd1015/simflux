@@ -6,6 +6,8 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-11
+
 ### Added
 
 - **Timing objects.** You can now select the default-timing model with an object
@@ -15,6 +17,22 @@ contain breaking changes.
   knobs no longer ride the `simulate()` signature for copula runs. The
   `"copula"`/`"frailty"` strings still work as sugar for default-configured
   objects. `Copula` and `Frailty` are exported at the top level.
+
+### Changed
+
+- **`CreditPortfolio.sector_correlation_matrix` is now a read-only property.**
+  Reassigning it never affected an already-constructed portfolio (the simulation
+  reads the validated internal value), so assignment now raises
+  `AttributeError` instead of being silently ignored. Pass the matrix at
+  construction.
+- **`TwoFactorCorrelationStructure` validates more strictly.** The sector
+  correlation matrix must now also have a unit diagonal and entries in
+  `[-1, 1]` (previously only symmetry and positive semi-definiteness were
+  checked) — the same invariants every other correlation seam enforces.
+- **Books with PD of exactly 0 or 1 run warning-free.** Multi-period copula
+  simulation no longer emits a spurious `RuntimeWarning` for obligors at the
+  PD endpoints, and NaN cumulative PDs are rejected loudly by both timing
+  models instead of silently zeroing risk in frailty calibration.
 
 ### Deprecated
 
@@ -34,8 +52,14 @@ contain breaking changes.
   `numpy_simulation.py` is deleted, so threshold parity holds by construction.
   The private Rust FFI renamed `default_timing`→`kernel` and
   `barriers`→`thresholds` (now required for both kernels, crossing as a NumPy
-  array). Rust copula numbers shift within numerical tolerance because one
-  quantile implementation now feeds both backends.
+  array). Seeded Rust copula results shift: distributional statistics move
+  within numerical tolerance (one quantile implementation now feeds both
+  backends), but an individual trial whose latent sat within ~1e-9 of a
+  threshold can flip default state, which changes that trial's loss and its
+  subsequent RNG draws — anyone pinning seeded trial-level outputs (interim
+  Parquet rows) will see changed rows. The Rust seam also gained content
+  guards (NaN thresholds and out-of-range `factor_phi` now error instead of
+  silently zeroing risk).
 - **One value each way at the portfolio backend seam.** `PortfolioInputs`
   (self-validating) carries the whole adapter contract in;
   `_complete_result()`, next to the `PortfolioResult` TypedDict, is the single

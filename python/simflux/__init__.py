@@ -19,7 +19,7 @@ from .utils.random_utils import set_seed
 from .core.engine import SimulationEngine
 from .core.backend import Backend
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __author__ = "SimFlux Contributors"
 
 __all__ = [
