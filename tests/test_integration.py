@@ -13,8 +13,15 @@ class TestIntegrationWorkflows:
     """Test complete workflows from start to finish."""
 
     def test_single_asset_workflow(self):
-        """Test complete single-asset GBM workflow."""
-        gbm = sf.GBM(mu=0.05, sigma=0.2, S0=100)
+        """Test complete single-asset GBM workflow.
+
+        Seeded: the mean-log-return assertion is ~3 standard errors wide at
+        1000 paths, so an unseeded run fails by chance every few hundred runs
+        (observed in CI). A fixed seed makes the statistical check exact.
+        """
+        from simflux.core.base import SimulationConfig
+
+        gbm = sf.GBM(mu=0.05, sigma=0.2, S0=100, config=SimulationConfig(seed=20260612))
 
         n_paths, n_steps = 1000, 252
         paths = gbm.simulate(n_paths=n_paths, n_steps=n_steps, T=1.0)
@@ -37,17 +44,18 @@ class TestIntegrationWorkflows:
 
     def test_multi_asset_correlation_workflow(self):
         """Test correlated multi-asset workflow."""
-        correlation_matrix = np.array([
-            [1.0, 0.5, 0.3],
-            [0.5, 1.0, 0.4],
-            [0.3, 0.4, 1.0]
-        ])
+        correlation_matrix = np.array(
+            [[1.0, 0.5, 0.3], [0.5, 1.0, 0.4], [0.3, 0.4, 1.0]]
+        )
+
+        from simflux.core.base import SimulationConfig
 
         corr_gbm = sf.CorrelatedGBM(
             mu=[0.06, 0.04, 0.08],
             sigma=[0.2, 0.15, 0.25],
             S0=[100, 50, 200],
-            correlation_matrix=correlation_matrix
+            correlation_matrix=correlation_matrix,
+            config=SimulationConfig(seed=20260612),
         )
 
         n_paths, n_steps = 2000, 100
@@ -76,40 +84,43 @@ class TestIntegrationWorkflows:
     def test_portfolio_risk_workflow(self):
         """Test complete portfolio risk analysis workflow."""
         n_assets_per_sector = [25, 20, 15]
-        sectors = ['Technology', 'Finance', 'Healthcare']
+        sectors = ["Technology", "Finance", "Healthcare"]
 
-        sector_corr = np.array([
-            [1.0, 0.2, 0.1],
-            [0.2, 1.0, 0.15],
-            [0.1, 0.15, 1.0]
-        ])
+        sector_corr = np.array([[1.0, 0.2, 0.1], [0.2, 1.0, 0.15], [0.1, 0.15, 1.0]])
 
         portfolio = sf.CreditPortfolio.create_sample_portfolio(
             n_assets_per_sector=n_assets_per_sector,
             sectors=sectors,
             sector_correlation_matrix=sector_corr,
             intra_sector_correlations={
-                'Technology': 0.4,
-                'Finance': 0.5,
-                'Healthcare': 0.3
-            }
+                "Technology": 0.4,
+                "Finance": 0.5,
+                "Healthcare": 0.3,
+            },
         )
 
         results = portfolio.simulate(n_simulations=5000)
 
-        assert 'portfolio_statistics' in results
-        assert 'sector_statistics' in results
+        assert "portfolio_statistics" in results
+        assert "sector_statistics" in results
 
-        portfolio_stats = results['portfolio_statistics']
-        required_stats = ['mean', 'std_dev', 'var_95', 'var_99', 'var_999',
-                         'expected_shortfall_99', 'max_loss']
+        portfolio_stats = results["portfolio_statistics"]
+        required_stats = [
+            "mean",
+            "std_dev",
+            "var_95",
+            "var_99",
+            "var_999",
+            "expected_shortfall_99",
+            "max_loss",
+        ]
 
         for stat in required_stats:
             assert stat in portfolio_stats
             assert isinstance(portfolio_stats[stat], (int, float))
             assert portfolio_stats[stat] >= 0
 
-        sector_stats = results['sector_statistics']
+        sector_stats = results["sector_statistics"]
         assert len(sector_stats) == 3
 
         for sector in sectors:
@@ -123,6 +134,7 @@ class TestIntegrationWorkflows:
         gbm = sf.GBM(mu=0.05, sigma=0.2, S0=100)
 
         import time
+
         start_time = time.time()
         paths = gbm.simulate(n_paths=100, n_steps=50, T=1.0)
         execution_time = time.time() - start_time
@@ -133,8 +145,7 @@ class TestIntegrationWorkflows:
         # Test NumPy fallback directly via the engine
         engine = gbm.engine
         numpy_paths = engine._numpy_simulate_gbm(
-            mu=0.05, sigma=0.2, s0=100,
-            n_paths=100, n_steps=50, T=1.0
+            mu=0.05, sigma=0.2, s0=100, n_paths=100, n_steps=50, T=1.0
         )
 
         assert numpy_paths.shape == paths.shape
@@ -148,7 +159,7 @@ class TestIntegrationWorkflows:
                 mu=[0.05, 0.03],
                 sigma=[0.2, 0.15],
                 S0=[100, 50],
-                correlation_matrix=[[1.0, 0.3], [0.5, 1.0]]
+                correlation_matrix=[[1.0, 0.3], [0.5, 1.0]],
             )
 
         with pytest.raises(ValueError, match="sigma must have same length as mu"):
@@ -156,7 +167,7 @@ class TestIntegrationWorkflows:
                 mu=[0.05, 0.03, 0.04],
                 sigma=[0.2, 0.15],
                 S0=[100, 50, 75],
-                correlation_matrix=np.eye(3)
+                correlation_matrix=np.eye(3),
             )
 
         gbm = sf.GBM(mu=0.05, sigma=0.2, S0=100)
@@ -186,7 +197,7 @@ class TestIntegrationWorkflows:
             mu=[0.05, 0.03],
             sigma=[0.2, 0.15],
             S0=[100, 50],
-            correlation_matrix=[[1.0, 0.999], [0.999, 1.0]]
+            correlation_matrix=[[1.0, 0.999], [0.999, 1.0]],
         )
 
         paths_perfect = near_perfect_corr.simulate(n_paths=500, n_steps=50, T=0.25)
