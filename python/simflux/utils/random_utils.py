@@ -454,7 +454,11 @@ class CorrelationMatrix:
         primitive — so the repair policy and error mode stay in one place.
         """
         if self._factor is None:
-            self._factor = safe_cholesky(self._matrix, name=self._name)
+            factor = safe_cholesky(self._matrix, name=self._name)
+            # Read-only like the matrix itself: handing out a writable cached
+            # array would let one caller's mutation poison every later run.
+            factor.setflags(write=False)
+            self._factor = factor
         return self._factor
 
     def tolist(self) -> List[List[float]]:
@@ -463,9 +467,13 @@ class CorrelationMatrix:
 
     def __array__(self, dtype=None, copy=None) -> np.ndarray:
         # Lets np.asarray(cm) and ndarray-consuming code accept the value
-        # transparently; the underlying array stays read-only unless copied.
-        if dtype is not None:
+        # transparently. Honor NumPy 2 copy semantics: np.array(cm) passes
+        # copy=True and trusts the result to be a fresh (writable) array;
+        # only copy=False/None may return the read-only internal buffer.
+        if dtype is not None and dtype != self._matrix.dtype:
             return self._matrix.astype(dtype)
+        if copy:
+            return self._matrix.copy()
         return self._matrix
 
     def __repr__(self) -> str:

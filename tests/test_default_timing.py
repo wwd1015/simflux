@@ -166,6 +166,42 @@ def test_timing_plan_invariants():
         plan.thresholds[0, 0] = 0.0
 
 
+def test_extreme_pds_simulate_without_warnings():
+    """A book containing PD of exactly 0 and 1 must run warning-free in
+    multi-period copula mode (regression: the staircase monotonicity check
+    emitted RuntimeWarning on the inf-inf diff, crashing under -W error)."""
+    import numpy as np
+
+    assets = [
+        sf.AssetData(0, 0, 0.0, 0.5, 0.1, 1.0, "A"),
+        sf.AssetData(1, 0, 1.0, 0.5, 0.1, 1.0, "A"),
+        sf.AssetData(2, 0, 0.05, 0.5, 0.1, 1.0, "A"),
+    ]
+    port = sf.CreditPortfolio(
+        assets=assets, intra_sector_correlations=0.4,
+        sector_correlation_matrix=[[1.0]], config=SimulationConfig(seed=11),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        res = port.simulate(n_simulations=500, n_periods=4, period_length=0.25)
+    # PD=0 never defaults, PD=1 always does: mean loss per unit exposure ~ LGD/3.
+    assert 0.0 < res["portfolio_statistics"]["mean"] < 3.0
+    assert np.isfinite(res["portfolio_statistics"]["var_99"])
+
+
+def test_nan_cumulative_pds_rejected_by_both_models():
+    """NaN cumulative PDs must fail loudly in BOTH timing models (regression:
+    frailty calibration silently converged to never-defaults barriers)."""
+    import numpy as np
+
+    cum = np.array([[np.nan], [0.5]])
+    rhos = np.array([0.4])
+    with pytest.raises(ValueError, match="must not contain NaN"):
+        sf.Copula().plan(cumulative_pds=cum, intra_correlations=rhos, period_length=0.5)
+    with pytest.raises(ValueError, match="must not contain NaN"):
+        sf.Frailty().plan(cumulative_pds=cum, intra_correlations=rhos, period_length=0.5)
+
+
 def test_frailty_plan_preserves_marginal_pd():
     """The plan's barriers invert to the input cumulative PDs (deterministic,
     no Monte Carlo) — the calibration invariant, checked at the plan seam."""

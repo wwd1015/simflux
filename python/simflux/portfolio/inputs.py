@@ -30,7 +30,7 @@ if TYPE_CHECKING:  # avoid a runtime cycle with two_factor_model
     from .two_factor_model import AssetData
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class PortfolioInputs:
     """Everything a portfolio backend adapter needs to run one simulation."""
 
@@ -57,6 +57,32 @@ class PortfolioInputs:
         n_assets = len(self.assets)
         if self.n_simulations <= 0:
             raise ValueError("n_simulations must be positive")
+        if self.n_periods <= 0:
+            raise ValueError("n_periods must be positive")
+        if self.period_length <= 0:
+            raise ValueError("period_length must be positive")
+        n_sectors = len(self.sector_names)
+        if len(self.intra_sector_correlations) != n_sectors:
+            raise ValueError(
+                f"intra_sector_correlations must have one value per sector ({n_sectors})"
+            )
+        if len(self.systematic_lgd_correlations) != n_sectors:
+            raise ValueError(
+                f"systematic_lgd_correlations must have one value per sector ({n_sectors})"
+            )
+        # Freeze the per-obligor arrays (defensive copies) so a hand-built
+        # instance can't be invalidated after construction — "validated at
+        # construction" must stay true for the instance's whole lifetime.
+        for name in (
+            "asset_intra_correlations",
+            "asset_sector_ids",
+            "asset_lgd_stds",
+            "asset_exposures",
+            "lgd_means_by_period",
+        ):
+            arr = np.array(getattr(self, name), copy=True)
+            arr.setflags(write=False)
+            object.__setattr__(self, name, arr)
         if self.plan.thresholds.shape != (self.n_periods, n_assets):
             raise ValueError(
                 f"timing plan thresholds shape {self.plan.thresholds.shape} must be "

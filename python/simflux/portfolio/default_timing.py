@@ -58,15 +58,20 @@ def _clean_cumulative_pds(cumulative_pds: np.ndarray) -> np.ndarray:
     period axis (matching what the frailty calibration always did); the caller
     is responsible for genuine term-structure validation.
     """
-    cum = np.clip(np.asarray(cumulative_pds, dtype=float), 0.0, 1.0)
+    cum = np.asarray(cumulative_pds, dtype=float)
     if cum.ndim != 2:
         raise ValueError(
             f"cumulative_pds must be (n_periods, n_assets), got ndim={cum.ndim}"
         )
-    return np.maximum.accumulate(cum, axis=0)
+    # Reject NaN here, once, for every timing model: np.clip would propagate it,
+    # the copula plan would fail late, and the frailty calibration would silently
+    # converge to "never defaults" — one loud error site instead.
+    if np.isnan(cum).any():
+        raise ValueError("cumulative_pds must not contain NaN")
+    return np.maximum.accumulate(np.clip(cum, 0.0, 1.0), axis=0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class TimingPlan:
     """The frozen artifact a default timing model derives for a given book.
 
@@ -107,8 +112,12 @@ class TimingPlan:
             if self.factor_phi != 0.0:
                 raise ValueError("the copula kernel implies factor_phi == 0.0")
             # ±inf endpoints (cum PD of exactly 0/1) make diff produce NaN for
-            # repeated infinities; NaN compares False, which is the right answer.
-            if np.any(np.diff(t, axis=0) < 0.0):
+            # repeated infinities; NaN compares False, which is the right answer —
+            # errstate suppresses the spurious invalid-subtract warning so a
+            # legitimate PD-0/1 book doesn't warn (or crash under -W error).
+            with np.errstate(invalid="ignore"):
+                staircase_decreases = np.any(np.diff(t, axis=0) < 0.0)
+            if staircase_decreases:
                 raise ValueError(
                     "copula thresholds must be non-decreasing down each column "
                     "(the cumulative-PD staircase)"

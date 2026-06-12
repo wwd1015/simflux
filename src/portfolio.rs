@@ -464,6 +464,21 @@ pub fn simulate_portfolio_losses(
             "thresholds must have n_periods entries per asset".to_string(),
         ));
     }
+    // Content guards: NaN thresholds make `value <= threshold` always false
+    // (silent zero defaults) and a NaN/out-of-range factor_phi silently zeroes
+    // the factor path — error loudly instead. ±inf thresholds are legitimate
+    // (cumulative PD of exactly 0 or 1).
+    if thresholds.iter().any(|row| row.iter().any(|v| v.is_nan())) {
+        return Err(PortfolioError::ConfigError(
+            "thresholds must not contain NaN".to_string(),
+        ));
+    }
+    if factor_phi.is_nan() || !(0.0..=1.0).contains(&factor_phi) {
+        return Err(PortfolioError::ConfigError(format!(
+            "factor_phi must be in [0, 1], got {}",
+            factor_phi
+        )));
+    }
 
     // Group assets by sector
     let mut sector_assets: HashMap<u32, Vec<&AssetData>> = HashMap::new();

@@ -332,11 +332,19 @@ class CreditPortfolio(BaseSimulator):
         self._sector_corr = self._prepare_sector_correlation_matrix(
             sector_correlation_matrix
         )
-        # Public read-only ndarray view; the validated value object is the
-        # internal currency (cached Cholesky, FFI marshalling).
-        self.sector_correlation_matrix = self._sector_corr.values
 
         self.validate_inputs()
+
+    @property
+    def sector_correlation_matrix(self) -> np.ndarray:
+        """The validated sector correlation matrix (read-only ndarray view).
+
+        A property rather than a plain attribute so reassignment raises
+        ``AttributeError`` instead of being silently ignored — the simulation
+        reads the validated value object, not this view, so an accepted
+        reassignment would be a silent no-op.
+        """
+        return self._sector_corr.values
 
     @property
     def systematic_lgd_correlation(self) -> Union[float, List[float]]:
@@ -697,9 +705,13 @@ class CreditPortfolio(BaseSimulator):
             )
         except RuntimeError as exc:
             if inputs.store_interim:
+                # Keep the underlying Rust error visible: every Rust failure
+                # arrives as RuntimeError, and not all of them are storage
+                # problems — masking the message misattributes config errors.
                 raise RuntimeError(
-                    "Interim storage via the Rust backend is not available; disable "
-                    "store_interim or run in Python fallback mode."
+                    "Rust backend failed with store_interim=True (interim storage "
+                    "requires the Rust backend; disable store_interim or run in "
+                    f"Python fallback mode). Underlying error: {exc}"
                 ) from exc
             raise
 

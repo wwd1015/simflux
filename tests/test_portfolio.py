@@ -339,6 +339,20 @@ class TestCreditPortfolio:
         assert 'portfolio_statistics' in results
         assert 'sector_statistics' in results
 
+    def test_sector_correlation_matrix_is_read_only(self):
+        """Reassignment must raise, not be silently ignored (regression: the
+        simulation reads the validated value object, so an accepted reassignment
+        was a silent no-op), and the view itself is immutable."""
+        assets = self.create_sample_assets()
+        portfolio = sf.CreditPortfolio(assets=assets)
+
+        with pytest.raises(AttributeError):
+            portfolio.sector_correlation_matrix = np.eye(
+                len(portfolio.sector_names)
+            )
+        with pytest.raises(ValueError):
+            portfolio.sector_correlation_matrix[0, 0] = 0.5
+
     def test_result_contract_complete_and_exact(self):
         """The emitted key set IS the PortfolioResult contract: every annotated
         key present (analyzer is the only storage-conditional one) and no
@@ -417,5 +431,10 @@ class TestInterimStorage:
         portfolio = sf.CreditPortfolio(assets=assets)
         storage_config = sf.StorageConfig(store_interim=True, output_path="results.parquet")
 
-        with pytest.raises(RuntimeError, match="Interim storage via the Rust backend is not available"):
+        # The wrapper names the store_interim context AND preserves the
+        # underlying Rust error so non-storage failures aren't misattributed.
+        with pytest.raises(
+            RuntimeError,
+            match="interim storage requires the Rust backend.*temporarily unavailable",
+        ):
             portfolio.simulate(n_simulations=10, storage_config=storage_config)
