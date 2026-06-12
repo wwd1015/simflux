@@ -199,9 +199,7 @@ class Copula(DefaultTiming):
     ) -> TimingPlan:
         self._validate_plan_inputs(cumulative_pds, intra_correlations, period_length)
         cum = _clean_cumulative_pds(cumulative_pds)
-        return TimingPlan(
-            kernel="copula", thresholds=_norm_ppf(cum), factor_phi=0.0
-        )
+        return TimingPlan(kernel="copula", thresholds=_norm_ppf(cum), factor_phi=0.0)
 
     def stamp(self) -> Dict[str, Any]:
         return {"default_timing": "copula", "factor_persistence": None}
