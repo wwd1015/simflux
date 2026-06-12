@@ -16,7 +16,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
-from ..utils.random_utils import safe_cholesky
+from ..utils.random_utils import CorrelationMatrix, correlation_matrix_diagnostics
 
 
 class CorrelationError(ValueError):
@@ -70,12 +70,10 @@ class TwoFactorCorrelationStructure:
         self.n_sectors = len(self.sector_sizes)
         self.n_assets = sum(self.sector_sizes)
 
-        self._sector_corr_matrix = self._build_sector_correlation_matrix(
+        self._sector_corr = self._build_sector_correlation_matrix(
             sector_correlation_matrix
         )
-        self._sector_cholesky = safe_cholesky(
-            self._sector_corr_matrix, name="sector_correlation_matrix"
-        )
+        self._sector_corr_matrix = self._sector_corr.values
 
         self._asset_indices = self._build_asset_index_map()
 
@@ -101,7 +99,7 @@ class TwoFactorCorrelationStructure:
 
     def _build_sector_correlation_matrix(
         self, sector_correlation_matrix: Optional[Sequence[Sequence[float]]]
-    ) -> np.ndarray:
+    ) -> CorrelationMatrix:
         n = len(self.sector_sizes)
         if sector_correlation_matrix is None:
             matrix = np.full((n, n), float(self.inter_sector_correlation), dtype=float)
@@ -113,14 +111,11 @@ class TwoFactorCorrelationStructure:
                     "sector_correlation_matrix must match number of sectors"
                 )
 
-        if not np.allclose(matrix, matrix.T, atol=1e-8):
-            raise ValueError("sector_correlation_matrix must be symmetric")
-
-        eigenvalues = np.linalg.eigvalsh(matrix)
-        if np.min(eigenvalues) < -1e-8:
-            raise ValueError("sector_correlation_matrix must be positive semi-definite")
-
-        return matrix
+        # This is a diagnostics helper, so PSD suffices (safe_cholesky repairs a
+        # singular matrix when sampling); the simulation seam requires strict PD.
+        return CorrelationMatrix(
+            matrix, name="sector_correlation_matrix", check_positive_definite=False
+        )
 
     def _build_asset_index_map(self) -> Dict[int, slice]:
         offsets = {}
@@ -216,32 +211,16 @@ class TwoFactorCorrelationStructure:
 
         rng = np.random.default_rng(seed)
         draws = rng.standard_normal(size=(n_simulations, self.n_sectors))
-        factors = draws @ self._sector_cholesky.T
+        factors = draws @ self._sector_corr.cholesky().T
         return [SystematicFactors(factors[i]) for i in range(n_simulations)]
 
     def validate_structure(self) -> Dict[str, bool]:
-        """Run structural validation checks on the correlation matrix."""
+        """Run structural validation checks on the correlation matrix.
 
-        matrix = self.get_correlation_matrix()
-        symmetric = np.allclose(matrix, matrix.T, atol=1e-8)
-        diagonal_ones = np.allclose(np.diag(matrix), 1.0, atol=1e-8)
-        bounds_valid = np.all((matrix >= -1.0 - 1e-8) & (matrix <= 1.0 + 1e-8))
-
-        try:
-            np.linalg.cholesky(matrix)
-            positive_definite = True
-        except np.linalg.LinAlgError:
-            positive_definite = False
-
-        return {
-            "is_symmetric": bool(symmetric),
-            "diagonal_ones": bool(diagonal_ones),
-            "bounds_valid": bool(bounds_valid),
-            "positive_definite": positive_definite,
-            "structure_valid": bool(
-                symmetric and diagonal_ones and bounds_valid and positive_definite
-            ),
-        }
+        Delegates to the shared per-check diagnostics so these checks cannot
+        drift from the strict validator's invariants or tolerance.
+        """
+        return correlation_matrix_diagnostics(self.get_correlation_matrix())
 
     def summary(self) -> Dict[str, object]:
         """Produce diagnostic information about the structure."""

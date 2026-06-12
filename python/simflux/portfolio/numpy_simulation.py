@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import warnings
 from math import erf
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional
 
 import numpy as np
 
-from ..core.base import SimulationConfig, check_memory
-from ..utils.random_utils import approx_norm_ppf, safe_cholesky
+from ..core.base import check_memory
+from .inputs import PortfolioInputs
 
 # Max f64 elements in one dense (chunk, n_assets) scratch array. The reduction
 # below summarizes each chunk of simulations, so this caps peak scratch instead
@@ -40,37 +40,32 @@ from ..utils.random_utils import approx_norm_ppf, safe_cholesky
 FALLBACK_CHUNK_ELEMENTS = 32_768
 
 
-def simulate_portfolio_numpy(
-    *,
-    config: SimulationConfig,
-    sector_correlation_matrix: np.ndarray,
-    asset_intra_correlations: np.ndarray,
-    systematic_lgd_correlations: Sequence[float],
-    sector_names: Sequence[str],
-    asset_sector_ids: np.ndarray,
-    lgd_means_by_period: np.ndarray,
-    asset_lgd_stds: np.ndarray,
-    asset_exposures: np.ndarray,
-    cumulative_pds_by_period: np.ndarray,
-    n_simulations: int,
-    n_periods: int,
-    default_timing: str,
-    factor_phi: float,
-    barriers: Optional[np.ndarray],
-) -> Dict[str, Any]:
+def simulate_portfolio_numpy(inputs: PortfolioInputs) -> Dict[str, Any]:
     """Run the portfolio loss simulation in vectorized NumPy.
 
-    ``lgd_means_by_period`` and ``cumulative_pds_by_period`` are
-    ``(n_periods, n_assets)``: the obligor's LGD Beta mean, and its cumulative PD,
-    by period end.  ``barriers`` is the calibrated per-period barrier matrix
-    (frailty only).  Returns ``{"portfolio_statistics", "sector_statistics"}``;
-    the caller stamps the rest of the :class:`PortfolioResult` contract.
+    ``inputs`` is the backend seam's whole contract — the same value the Rust
+    adapter consumes, validated at construction (shapes, plan/period
+    consistency).  Its timing plan is the sole timing input: this adapter never
+    derives thresholds, it only selects the simulation kernel the plan names
+    and compares latents against ``plan.thresholds``.  Returns
+    ``{"portfolio_statistics", "sector_statistics"}``; the caller completes the
+    :class:`PortfolioResult` contract (one stamping site, next to the TypedDict).
     """
+    config = inputs.config
+    sector_names = inputs.sector_names
+    asset_intra_correlations = inputs.asset_intra_correlations
+    systematic_lgd_correlations = inputs.systematic_lgd_correlations
+    asset_sector_ids = inputs.asset_sector_ids
+    lgd_means_by_period = inputs.lgd_means_by_period
+    asset_lgd_stds = inputs.asset_lgd_stds
+    asset_exposures = inputs.asset_exposures
+    n_simulations = inputs.n_simulations
+    plan = inputs.plan
+    n_periods = plan.n_periods
     try:
         from scipy import stats as scipy_stats
         from scipy.special import erf as scipy_erf
 
-        norm_ppf = scipy_stats.norm.ppf
         beta_ppf = scipy_stats.beta.ppf
         erf_func = scipy_erf
         have_scipy = True
@@ -86,7 +81,6 @@ def simulate_portfolio_numpy(
         )
         from ..utils.special import beta_ppf as _fallback_beta_ppf
 
-        norm_ppf = approx_norm_ppf
         beta_ppf = _fallback_beta_ppf
         erf_func = np.vectorize(erf)
         have_scipy = False
@@ -104,9 +98,9 @@ def simulate_portfolio_numpy(
     # with n_assets * n_simulations.
     check_memory(config, n_simulations * (n_sectors + 1) + 8 * FALLBACK_CHUNK_ELEMENTS)
 
-    sector_cholesky = safe_cholesky(
-        sector_correlation_matrix, name="sector_correlation_matrix"
-    )
+    # The validated CorrelationMatrix value carries its own (cached) sampling
+    # factor — no raw decomposition at this seam.
+    sector_cholesky = inputs.sector_correlation.cholesky()
 
     asset_sector_ids = np.asarray(asset_sector_ids)
     asset_lgd_stds = np.asarray(asset_lgd_stds)
@@ -206,10 +200,10 @@ def simulate_portfolio_numpy(
         )
         return _inv_beta(lgd_uniform, alpha, beta)
 
-    # Per-period default thresholds (copula): Phi^{-1}(cumulative PD by period end).
-    # Non-decreasing in period because cumulative PD is, so the first period whose
-    # threshold a frozen latent crosses is its default period.
-    thresholds_by_period = norm_ppf(np.asarray(cumulative_pds_by_period, dtype=float))
+    # Per-period thresholds come from the timing plan for BOTH kernels — the
+    # staircase/barrier derivation lives in default_timing, not here, and the
+    # plan/LGD shape consistency was validated by PortfolioInputs.
+    thresholds_by_period = plan.thresholds
     asset_cols = np.arange(n_assets)
 
     # Asset column indices per sector, computed once for the chunk reduction.
@@ -245,9 +239,9 @@ def simulate_portfolio_numpy(
 
     def _frailty_chunk_losses(n_chunk: int) -> np.ndarray:
         # Dynamic frailty: a persistent (AR(1)) systematic factor with fresh
-        # idiosyncratic shocks each period; first-passage against the pre-calibrated
-        # barriers (which preserve the marginal PD for any phi).
-        assert barriers is not None  # always computed for default_timing="frailty"
+        # idiosyncratic shocks each period; first-passage against the plan's
+        # pre-calibrated barriers (which preserve the marginal PD for any phi).
+        factor_phi = plan.factor_phi
         sqrt_innov = (max(0.0, 1.0 - factor_phi**2)) ** 0.5
         prev_factor: Optional[np.ndarray] = None
         ever_defaulted = np.zeros((n_chunk, n_assets), dtype=bool)
@@ -267,7 +261,7 @@ def simulate_portfolio_numpy(
                 + idio_loadings[np.newaxis, :] * idiosyncratic
             )
 
-            thresholds = barriers[period]  # (n_assets,) calibrated barrier
+            thresholds = thresholds_by_period[period]  # (n_assets,) calibrated barrier
             new_defaults = (asset_values <= thresholds[np.newaxis, :]) & ~ever_defaulted
 
             if np.any(new_defaults):
@@ -290,7 +284,7 @@ def simulate_portfolio_numpy(
         return chunk_losses
 
     chunk_losses_fn = (
-        _copula_chunk_losses if default_timing == "copula" else _frailty_chunk_losses
+        _copula_chunk_losses if plan.kernel == "copula" else _frailty_chunk_losses
     )
 
     total_losses = np.empty(n_simulations)

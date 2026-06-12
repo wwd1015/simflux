@@ -101,13 +101,21 @@ for step in range(n_steps):
 
 ### 3. Portfolio Loss Simulation
 
+Both backends consume the same inputs: `simulate()` assembles one
+`PortfolioInputs` (per-obligor arrays, the validated sector correlation matrix,
+run parameters) and one **timing plan** — the per-period, per-obligor threshold
+matrix derived once in Python by the chosen default-timing model (`Copula` /
+`Frailty`). Neither backend derives default thresholds itself, so threshold
+parity across backends holds by construction.
+
 #### Rust Backend Flow
 ```mermaid
 graph TD
-    A[Python CreditPortfolio.simulate()] --> B[Rust PortfolioConfig]
+    A[Python CreditPortfolio.simulate()] --> P[PortfolioInputs + TimingPlan]
+    P --> B[Rust PortfolioConfig + thresholds]
     B --> C[Two-factor correlation structure]
     C --> D[Parallel systematic factor generation]
-    D --> E[Parallel asset simulation]
+    D --> E[Parallel trial simulation vs plan thresholds]
     E --> F[Beta distribution sampling]
     F --> G[Portfolio aggregation]
     G --> H[Parquet storage (optional)]
@@ -136,29 +144,29 @@ let trial_results: Vec<TrialResult> = (0..n_simulations)
 #### NumPy Fallback Flow
 ```mermaid
 graph TD
-    A[Python CreditPortfolio.simulate()] --> B[NumPy fallback implementation]
-    B --> C[Sequential systematic factors]
-    C --> D[Asset-by-asset simulation]
-    D --> E[Approximate beta distribution]
-    E --> F[Manual aggregation]
-    F --> G[Basic statistics]
-    G --> H[Return simplified results]
+    A[Python CreditPortfolio.simulate()] --> P[PortfolioInputs + TimingPlan]
+    P --> B[Vectorized chunked simulation]
+    B --> C[Cholesky-correlated sector factors per chunk]
+    C --> D[Latents vs plan thresholds, whole chunk at once]
+    D --> E[Exact Beta LGD via scipy, tabulated fallback without it]
+    E --> F[On-the-fly reduction to total + per-sector losses]
+    F --> G[Same statistics, same result keys as Rust]
 ```
 
-**NumPy Implementation Limitations:**
-```python
-# Simplified correlation structure
-sector_cholesky = np.linalg.cholesky(sector_corr_matrix)
-sector_loading = np.sqrt(self.intra_sector_correlations[asset.sector_id])
-idio_loading = np.sqrt(1 - self.intra_sector_correlations[asset.sector_id])
+**What the fallback actually is** (`portfolio/numpy_simulation.py`): a
+vectorized implementation that walks trials in bounded chunks (dense scratch is
+`O(chunk × n_assets)`, retained memory `O(n_simulations × n_sectors)`), draws
+correlated sector factors through the shared `CorrelationMatrix` Cholesky
+factor, and prices LGD from the exact Beta inverse-CDF (scipy when installed; an
+accurate tabulated inversion otherwise — only the normal quantile is
+approximated without scipy). The per-simulation math mirrors the Rust path, and
+cross-validation tests assert the two agree in distribution.
 
-# Sequential processing (much slower)
-for trial in range(n_simulations):
-    for asset in self.assets:
-        # Individual asset simulation
-        # No interim result storage
-        # Simplified statistics
-```
+**Real differences from the Rust backend:** speed (Rust parallelizes trials via
+Rayon with the GIL released), interim Parquet storage (Rust-only — the fallback
+warns and proceeds without persistence), and RNG streams (seeds reproduce
+within a backend, not across backends). The result contract is identical: a
+test pins both backends' key sets against `PortfolioResult.__annotations__`.
 
 ## Performance Characteristics
 
@@ -181,7 +189,7 @@ for trial in range(n_simulations):
 
 #### Random Number Generation
 - **Rust**: Thread-safe RNG with superior statistical properties
-- **NumPy**: NumPy's MT19937 with Python threading limitations
+- **NumPy**: `np.random.default_rng` (PCG64) — seeds reproduce within a backend, not across backends
 
 #### Correlation Handling
 - **Rust**: Nalgebra optimized linear algebra with BLAS

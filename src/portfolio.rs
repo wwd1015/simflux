@@ -213,18 +213,9 @@ fn get_conditional_pd(asset: &AssetData, period: usize, n_periods: usize) -> f64
     }
 }
 
-/// Cumulative PD by the end of `period` (0-indexed).  From the term structure
-/// directly when present, else from the flat `pd` under a constant hazard so the
-/// final period returns `pd` exactly.  Used by the "copula" default-timing model.
-fn cumulative_pd(asset: &AssetData, period: usize, n_periods: usize) -> f64 {
-    if let Some(ref ts) = asset.pd_term_structure {
-        if !ts.is_empty() {
-            let idx = period.min(ts.len() - 1);
-            return ts[idx].clamp(0.0, 1.0);
-        }
-    }
-    1.0 - (1.0 - asset.pd).powf((period as f64 + 1.0) / n_periods as f64)
-}
+// (The cumulative-PD staircase derivation that used to live here moved behind
+// the Python-side timing plan — see python/simflux/portfolio/default_timing.py —
+// so both backends consume identical thresholds instead of re-deriving them.)
 
 // ---------------------------------------------------------------------------
 // Portfolio config
@@ -424,9 +415,9 @@ pub fn simulate_portfolio_losses(
     n_simulations: usize,
     n_periods: usize,
     period_length: f64,
-    default_timing: &str,
+    kernel: &str,
     factor_phi: f64,
-    barriers: &[Vec<f64>],
+    thresholds: &[Vec<f64>],
     seed: Option<u64>,
     store_interim: bool,
     output_path: Option<String>,
@@ -444,33 +435,49 @@ pub fn simulate_portfolio_losses(
             "period_length must be positive".to_string(),
         ));
     }
-    // "copula": single frozen latent vs cumulative thresholds (default times,
-    // Li 2000). "frailty": persistent AR(1) factor with fresh idiosyncratic and
-    // pre-calibrated barriers. Both reproduce the marginal term structure exactly.
-    let copula = match default_timing {
+    // The kernel names the simulation dynamic; the thresholds come from the
+    // Python-side timing plan for BOTH kernels (staircase quantiles for
+    // "copula", calibrated barriers for "frailty") — this backend never derives
+    // them. "copula": single frozen latent, first crossing (Li 2000).
+    // "frailty": persistent AR(1) factor with fresh idiosyncratic shocks,
+    // first passage (Duffie et al. 2009).
+    let copula = match kernel {
         "copula" => true,
         "frailty" => false,
         other => {
             return Err(PortfolioError::ConfigError(format!(
-                "default_timing must be 'copula' or 'frailty', got '{}'",
+                "kernel must be 'copula' or 'frailty', got '{}'",
                 other
             )))
         }
     };
-    if !copula {
-        if barriers.len() != assets.len() {
-            return Err(PortfolioError::ConfigError(
-                "frailty mode requires one barrier row per asset".to_string(),
-            ));
-        }
-        // Guard the inner dimension too: simulate_single_trial indexes
-        // barriers[idx][period] for period in 0..n_periods, so a too-short row
-        // would panic across the FFI boundary instead of erroring cleanly.
-        if barriers.iter().any(|row| row.len() < n_periods) {
-            return Err(PortfolioError::ConfigError(
-                "frailty mode requires n_periods barriers per asset".to_string(),
-            ));
-        }
+    // Guard both dimensions for both kernels: simulate_single_trial indexes
+    // thresholds[idx][period] for period in 0..n_periods, so a missing row or
+    // too-short row would panic across the FFI boundary instead of erroring.
+    if thresholds.len() != assets.len() {
+        return Err(PortfolioError::ConfigError(
+            "thresholds must have one row per asset (n_assets x n_periods)".to_string(),
+        ));
+    }
+    if thresholds.iter().any(|row| row.len() < n_periods) {
+        return Err(PortfolioError::ConfigError(
+            "thresholds must have n_periods entries per asset".to_string(),
+        ));
+    }
+    // Content guards: NaN thresholds make `value <= threshold` always false
+    // (silent zero defaults) and a NaN/out-of-range factor_phi silently zeroes
+    // the factor path — error loudly instead. ±inf thresholds are legitimate
+    // (cumulative PD of exactly 0 or 1).
+    if thresholds.iter().any(|row| row.iter().any(|v| v.is_nan())) {
+        return Err(PortfolioError::ConfigError(
+            "thresholds must not contain NaN".to_string(),
+        ));
+    }
+    if factor_phi.is_nan() || !(0.0..=1.0).contains(&factor_phi) {
+        return Err(PortfolioError::ConfigError(format!(
+            "factor_phi must be in [0, 1], got {}",
+            factor_phi
+        )));
     }
 
     // Group assets by sector
@@ -534,7 +541,7 @@ pub fn simulate_portfolio_losses(
                 assets,
                 &correlation_structure,
                 &all_factors,
-                barriers,
+                thresholds,
                 n_periods,
                 period_length,
                 copula,
@@ -601,7 +608,7 @@ fn simulate_single_trial(
     assets: &[AssetData],
     correlation_structure: &TwoFactorCorrelationStructure,
     all_factors: &[Vec<SystematicFactors>], // [period][trial]
-    barriers: &[Vec<f64>],                  // [asset][period], frailty only
+    thresholds: &[Vec<f64>],                // [asset][period], from the timing plan (both kernels)
     n_periods: usize,
     period_length: f64,
     copula: bool,
@@ -624,7 +631,9 @@ fn simulate_single_trial(
 
     if copula {
         // One-factor Gaussian copula of default times: a single frozen latent
-        // per obligor vs the cumulative-PD staircase; default = first crossing.
+        // per obligor vs the plan's cumulative staircase; default = first
+        // crossing. The staircase is non-decreasing per asset (enforced by the
+        // TimingPlan), so the final period's threshold is the loosest.
         let factors = &all_factors[0][trial_id];
         for (idx, asset) in assets.iter().enumerate() {
             let sector_index = asset.sector_id as usize;
@@ -642,14 +651,13 @@ fn simulate_single_trial(
             factor_sector[idx] = sector_factor;
             factor_idio[idx] = idio;
 
-            let threshold_final =
-                calculate_default_threshold(cumulative_pd(asset, n_periods - 1, n_periods));
+            let threshold_final = thresholds[idx][n_periods - 1];
             if value <= threshold_final {
                 defaulted[idx] = true;
                 // Default period = first k whose cumulative threshold is crossed.
                 let mut dperiod = n_periods - 1;
                 for k in 0..n_periods {
-                    if value <= calculate_default_threshold(cumulative_pd(asset, k, n_periods)) {
+                    if value <= thresholds[idx][k] {
                         dperiod = k;
                         break;
                     }
@@ -669,7 +677,7 @@ fn simulate_single_trial(
         }
     } else {
         // Frailty: persistent (already AR(1)-coupled) factor, fresh idiosyncratic
-        // each period, first-passage against the pre-calibrated per-period barriers.
+        // each period, first-passage against the plan's calibrated barriers.
         for period in 0..n_periods {
             let factors = &all_factors[period][trial_id];
 
@@ -693,7 +701,7 @@ fn simulate_single_trial(
                 factor_sector[idx] = sector_factor;
                 factor_idio[idx] = idio;
 
-                let threshold = barriers[idx][period];
+                let threshold = thresholds[idx][period];
 
                 if value <= threshold {
                     defaulted[idx] = true;

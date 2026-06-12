@@ -13,12 +13,13 @@ from .processes.gbm import GBM, CorrelatedGBM
 from .processes.time_varying import TimeVaryingGBM, TimeVaryingCorrelatedGBM
 from .portfolio.two_factor_model import CreditPortfolio, AssetData
 from .portfolio.correlation import TwoFactorCorrelationStructure
+from .portfolio.default_timing import Copula, Frailty
 from .utils.storage import StorageConfig, ParquetResultsAnalyzer
 from .utils.random_utils import set_seed
 from .core.engine import SimulationEngine
 from .core.backend import Backend
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __author__ = "SimFlux Contributors"
 
 __all__ = [
@@ -32,6 +33,8 @@ __all__ = [
     "CreditPortfolio",
     "AssetData",
     "TwoFactorCorrelationStructure",
+    "Copula",
+    "Frailty",
     # Storage and utilities
     "StorageConfig",
     "ParquetResultsAnalyzer",

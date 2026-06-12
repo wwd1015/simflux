@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "simflux"
-version = "0.5.0"
+version = "0.6.0"
 description = "High-performance financial simulation library with Rust backend"
 authors = [{name = "SimFlux Contributors"}]
 readme = "README.md"

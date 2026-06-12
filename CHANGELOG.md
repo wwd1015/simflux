@@ -6,6 +6,69 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-11
+
+### Added
+
+- **Timing objects.** You can now select the default-timing model with an object
+  that carries its own configuration: `simulate(default_timing=Frailty(persistence=0.6))`
+  or `simulate(default_timing=Copula())`. Bad parameters fail at the line you
+  typed them (`Frailty(persistence=1.5)` raises immediately), and frailty-only
+  knobs no longer ride the `simulate()` signature for copula runs. The
+  `"copula"`/`"frailty"` strings still work as sugar for default-configured
+  objects. `Copula` and `Frailty` are exported at the top level.
+
+### Changed
+
+- **`CreditPortfolio.sector_correlation_matrix` is now a read-only property.**
+  Reassigning it never affected an already-constructed portfolio (the simulation
+  reads the validated internal value), so assignment now raises
+  `AttributeError` instead of being silently ignored. Pass the matrix at
+  construction.
+- **`TwoFactorCorrelationStructure` validates more strictly.** The sector
+  correlation matrix must now also have a unit diagonal and entries in
+  `[-1, 1]` (previously only symmetry and positive semi-definiteness were
+  checked) — the same invariants every other correlation seam enforces.
+- **Books with PD of exactly 0 or 1 run warning-free.** Multi-period copula
+  simulation no longer emits a spurious `RuntimeWarning` for obligors at the
+  PD endpoints, and NaN cumulative PDs are rejected loudly by both timing
+  models instead of silently zeroing risk in frailty calibration.
+
+### Deprecated
+
+- **`factor_persistence` keyword.** Pass `default_timing=Frailty(persistence=...)`
+  instead. The keyword still works alongside the string sugar (with a
+  `DeprecationWarning`) and is rejected alongside a timing object so persistence
+  can never be specified twice. Note: an out-of-range `factor_persistence`
+  passed with `"copula"` now warns and is ignored rather than raising (it was
+  always ignored semantically).
+
+### For contributors
+
+- **Unified threshold plan.** The chosen timing model derives a frozen
+  `TimingPlan` (per-period, per-obligor threshold matrix + AR(1) coefficient)
+  once in Python; both backends consume it and neither derives thresholds
+  anymore — the duplicated cumulative-PD staircase in `src/portfolio.rs` and
+  `numpy_simulation.py` is deleted, so threshold parity holds by construction.
+  The private Rust FFI renamed `default_timing`→`kernel` and
+  `barriers`→`thresholds` (now required for both kernels, crossing as a NumPy
+  array). Seeded Rust copula results shift: distributional statistics move
+  within numerical tolerance (one quantile implementation now feeds both
+  backends), but an individual trial whose latent sat within ~1e-9 of a
+  threshold can flip default state, which changes that trial's loss and its
+  subsequent RNG draws — anyone pinning seeded trial-level outputs (interim
+  Parquet rows) will see changed rows. The Rust seam also gained content
+  guards (NaN thresholds and out-of-range `factor_phi` now error instead of
+  silently zeroing risk).
+- **One value each way at the portfolio backend seam.** `PortfolioInputs`
+  (self-validating) carries the whole adapter contract in;
+  `_complete_result()`, next to the `PortfolioResult` TypedDict, is the single
+  place result keys are written, pinned by a contract test.
+- **`CorrelationMatrix` value type.** Correlation-matrix invariants are checked
+  once, at construction, with the shared `CORRELATION_TOLERANCE`; instances
+  carry a cached `cholesky()`. The hand-rolled checks in
+  `TwoFactorCorrelationStructure` (literal `1e-8`s) are gone.
+
 ## [0.5.0] — 2026-06-08
 
 ### Added

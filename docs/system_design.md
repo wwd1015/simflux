@@ -60,11 +60,24 @@ SimFlux uses a hybrid Python/Rust architecture:
 ### portfolio/two_factor_model.py
 - `AssetData`: Credit asset parameters (PD, LGD, exposure, sector)
 - `PortfolioResult`: `TypedDict` documenting the result contract **both backends honor** — same key set (`portfolio_statistics`, `sector_statistics`, `n_trials`, plus metadata); `analyzer` only when interim results are stored
+- `_complete_result()`: the **single place** result keys are written, next to the TypedDict; a contract test pins the emitted keys against `PortfolioResult.__annotations__`
 - `CreditPortfolio`: Merton two-factor credit model
   - Systematic factor = sector loading × sector factor + idio loading × noise
-  - Default if asset value ≤ Φ⁻¹(PD)
+  - Default if asset value ≤ the timing plan's threshold for the period
   - LGD via correlated Beta distribution
   - The full sector correlation matrix is the single source of truth at the Rust seam (no scalar `inter_sector_correlation` is passed)
+  - `simulate()` assembles one `PortfolioInputs` and dispatches it to whichever backend adapter runs
+
+### portfolio/default_timing.py
+- The single home for default-timing semantics: `Copula` / `Frailty(persistence=...)` timing objects (validated at construction; `stamp()` their own result keys), `resolve_timing()` for the `"copula"`/`"frailty"` string sugar, and the frozen `TimingPlan`
+- `plan()` derives the `(n_periods, n_assets)` threshold matrix **once**; both backends consume it (neither derives thresholds), so threshold parity holds by construction
+- `TimingPlan` enforces its invariants at construction: closed kernel set (`"copula"`/`"frailty"`), copula staircase non-decreasing per column, copula ⇒ `factor_phi == 0`
+
+### portfolio/inputs.py
+- `PortfolioInputs`: the backend seam's whole input contract — per-obligor arrays, the `TimingPlan`, the validated `CorrelationMatrix`, run/storage parameters — assembled once per `simulate()` and self-validating (shape and plan/period consistency), so the two backend adapters cannot drift apart
+
+### portfolio/frailty.py
+- Pure-function calibration layer behind `Frailty.plan()`: `calibrate_barriers` (1-D Markov forward recursion + bisection), `barrier_matrix` (per-book, cached by `(rho, curve)`), `per_period_phi`, and `survival_curve` — the deterministic inverse the calibration tests pin
 
 ### portfolio/correlation.py
 - `TwoFactorCorrelationStructure`: standalone **diagnostics/inspection** helper — builds the full asset correlation matrix, factor loadings, and sampled sector factors for examination. It is **not** on the simulation hot path (each backend computes loadings/factors inline); treat its output as diagnostics, not a guarantee of bit-for-bit agreement with a run.
@@ -78,7 +91,8 @@ SimFlux uses a hybrid Python/Rust architecture:
 ### utils/random_utils.py
 - `set_seed()`: Set global random seed for reproducibility (legacy API, also exported at top level)
 - `safe_cholesky()`: the single decompose-or-repair primitive used by every correlated sampler — repairs near-singular matrices and raises `ValueError` (never a raw `LinAlgError`)
-- Correlation matrix generation, validation, and correction — all using `CORRELATION_TOLERANCE`; the boolean `validate_correlation_matrix` is a thin wrapper over the raising `validate_correlation_matrix_strict`
+- `CorrelationMatrix`: validated correlation-matrix **value type** (internal currency) — construction runs the strict validator once with the shared tolerance; instances carry a lazily cached `cholesky()` and `tolist()` for the FFI. Public seams keep accepting raw arrays and construct it at their validation seam
+- Correlation matrix generation, validation, and correction — all using `CORRELATION_TOLERANCE`; the boolean `validate_correlation_matrix` is a thin wrapper over the raising `validate_correlation_matrix_strict`, and `correlation_matrix_diagnostics()` is the per-check boolean view of the same invariants
 - Block correlation matrices, factor-based correlation
 
 ## 3. Backend Selection Strategy
