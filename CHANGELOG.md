@@ -6,6 +6,72 @@ contain breaking changes.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-07
+
+Performance-and-quality release: measured on a 4-core Linux box against v0.6.0,
+single-asset and time-varying GBM are ~2x faster, time-varying correlated GBM
+~1.9x, frailty portfolio runs ~1.9x, and copula portfolio runs ~1.25x — with
+seeded GBM output bit-identical to v0.6.0.
+
+### Changed
+
+- **LGD quantiles are now accurate to machine precision.** The Rust backend's
+  Beta inverse-CDF was statrs's generic 16-step bisection — ~18 CDF evaluations
+  per default event and only ~1e-4 absolute accuracy. It is replaced by a
+  bracketed Newton solver on the regularized incomplete beta (`beta_inverse_cdf`
+  in `math_utils.rs`, unit-tested against `scipy.stats.beta.ppf` at 1e-10),
+  which is both faster and matches the quantile the NumPy backend gets from
+  scipy. Seeded portfolio statistics move at the ~1e-6 relative level as a
+  result; seeded GBM paths are unchanged.
+- **Frailty barrier calibration is vectorized across the book.**
+  `barrier_matrix` deduplicates obligors by (rho, cumulative-PD curve) and
+  calibrates all distinct profiles in one batched bisection
+  (`calibrate_barriers_batch`); the scalar `calibrate_barriers` is now a
+  single-column wrapper over the same implementation. The erf implementation is
+  resolved once at import instead of per call. Calibration of a 200-obligor,
+  4-period book drops from ~0.9s to well under 0.1s; results agree with the
+  scalar path to solver tolerance.
+- **`SimulationConfig` is exported at the top level** (`simflux.SimulationConfig`);
+  previously the only supported spelling was `simflux.core.base.SimulationConfig`
+  even though every simulator constructor takes it.
+
+### Performance
+
+- **Release wheels build with fat LTO and a single codegen unit**
+  (`[profile.release]` in `Cargo.toml`), letting LLVM inline the RNG and
+  distribution crates into the Monte Carlo inner loops.
+- **All GBM kernels write one flat result buffer in place** (`Array2`/`Array3`)
+  instead of nested `Vec`s flattened at the FFI boundary — single-asset and
+  time-varying GBM no longer allocate per path or copy the full result an
+  extra time; time-varying correlated GBM no longer builds a
+  `Vec<Vec<Vec<f64>>>`. Per-path RNG streams are unchanged, so seeded output
+  is bit-identical.
+- **The GIL is released during all Rust simulation compute**
+  (`py.allow_threads`), so long simulations no longer block other Python
+  threads.
+- **The portfolio trial loop hoists per-asset constants** (sector/idiosyncratic
+  loadings, LGD coupling, per-period LGD Beta parameters with precomputed
+  `ln B(a, b)`) out of the hot path, systematic factors live in one flat
+  trial-major buffer per period instead of a boxed `Vec` per trial, and the
+  copula kernel accumulates losses inline instead of through eight per-trial
+  scratch arrays (the frailty kernel keeps its index-order reduce, and event
+  detail arrays are now allocated only when interim storage is requested).
+
+### Removed
+
+- **`benchmarks/benchmark_report_only.py` and
+  `benchmarks/sample_benchmark_results.py`** — both printed hardcoded,
+  fabricated timings formatted as measurement reports. The real harness,
+  `benchmarks/performance_comparison.py` (subprocess-isolated timing and peak
+  RSS), remains and is what `make benchmark` runs.
+
+### For contributors
+
+- The Rust `TwoFactorCorrelationStructure::generate_factors` now returns a flat
+  trial-major `Vec<f64>` and the `SystematicFactors` struct is gone; Rust GBM
+  kernels return `ndarray` arrays rather than nested `Vec`s. The Python-facing
+  API is unchanged.
+
 ## [0.6.0] — 2026-06-11
 
 ### Added

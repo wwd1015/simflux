@@ -25,51 +25,10 @@ use gbm::{
 };
 use portfolio::{simulate_portfolio_losses, AssetData, PortfolioConfig};
 
-/// Flatten a `Vec<Vec<f64>>` (rows x cols) into a contiguous NumPy 2-D array.
-/// Returning a NumPy array instead of a Python list-of-lists avoids boxing every
-/// element into a `PyFloat`, which dominated the GBM marshalling cost.
-fn vec2_to_pyarray(py: Python<'_>, vv: Vec<Vec<f64>>) -> PyResult<Bound<'_, PyArray2<f64>>> {
-    let nrows = vv.len();
-    let ncols = vv.first().map_or(0, |r| r.len());
-    let mut flat = Vec::with_capacity(nrows * ncols);
-    for row in &vv {
-        if row.len() != ncols {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "ragged GBM path matrix",
-            ));
-        }
-        flat.extend_from_slice(row);
-    }
-    ndarray::Array2::from_shape_vec((nrows, ncols), flat)
-        .map(|arr| arr.into_pyarray_bound(py))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
-}
-
-/// Flatten a `Vec<Vec<Vec<f64>>>` (d0 x d1 x d2) into a contiguous NumPy 3-D array.
-fn vec3_to_pyarray(py: Python<'_>, vvv: Vec<Vec<Vec<f64>>>) -> PyResult<Bound<'_, PyArray3<f64>>> {
-    let d0 = vvv.len();
-    let d1 = vvv.first().map_or(0, |a| a.len());
-    let d2 = vvv.first().and_then(|a| a.first()).map_or(0, |p| p.len());
-    let mut flat = Vec::with_capacity(d0 * d1 * d2);
-    for a in &vvv {
-        if a.len() != d1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "ragged GBM path tensor",
-            ));
-        }
-        for p in a {
-            if p.len() != d2 {
-                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "ragged GBM path tensor",
-                ));
-            }
-            flat.extend_from_slice(p);
-        }
-    }
-    ndarray::Array3::from_shape_vec((d0, d1, d2), flat)
-        .map(|arr| arr.into_pyarray_bound(py))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
-}
+// The GBM kernels build contiguous ndarray buffers directly, so every entry
+// point below is a move into NumPy with no flattening copy, and the heavy
+// compute runs inside `py.allow_threads` so other Python threads make
+// progress during long simulations.
 
 #[pyfunction]
 #[pyo3(name = "simulate_gbm", signature = (mu, sigma, s0, n_paths, n_steps, dt, seed=None))]
@@ -83,10 +42,8 @@ fn py_simulate_gbm<'py>(
     dt: f64,
     seed: Option<u64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    vec2_to_pyarray(
-        py,
-        simulate_gbm_single(mu, sigma, s0, n_paths, n_steps, dt, seed),
-    )
+    let paths = py.allow_threads(|| simulate_gbm_single(mu, sigma, s0, n_paths, n_steps, dt, seed));
+    Ok(paths.into_pyarray_bound(py))
 }
 
 #[pyfunction]
@@ -102,19 +59,20 @@ fn py_simulate_gbm_multi<'py>(
     dt: f64,
     seed: Option<u64>,
 ) -> PyResult<Bound<'py, PyArray3<f64>>> {
-    let paths = simulate_gbm_correlated(
-        mu,
-        sigma,
-        s0,
-        correlation_matrix,
-        n_paths,
-        n_steps,
-        dt,
-        seed,
-    )
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    // `simulate_gbm_correlated` already produced a contiguous Array3, so this is a
-    // move into NumPy with no extra copy.
+    let paths = py
+        .allow_threads(|| {
+            simulate_gbm_correlated(
+                mu,
+                sigma,
+                s0,
+                correlation_matrix,
+                n_paths,
+                n_steps,
+                dt,
+                seed,
+            )
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     Ok(paths.into_pyarray_bound(py))
 }
 
@@ -133,8 +91,7 @@ fn py_simulate_gbm_time_varying<'py>(
     t_start: f64,
     seed: Option<u64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    vec2_to_pyarray(
-        py,
+    let paths = py.allow_threads(|| {
         simulate_gbm_time_varying_single(
             &mu_times,
             &mu_values,
@@ -146,8 +103,9 @@ fn py_simulate_gbm_time_varying<'py>(
             dt,
             t_start,
             seed,
-        ),
-    )
+        )
+    });
+    Ok(paths.into_pyarray_bound(py))
 }
 
 #[pyfunction]
@@ -166,21 +124,24 @@ fn py_simulate_gbm_time_varying_correlated<'py>(
     t_start: f64,
     seed: Option<u64>,
 ) -> PyResult<Bound<'py, PyArray3<f64>>> {
-    let paths = simulate_gbm_time_varying_correlated(
-        mu_times,
-        mu_values,
-        sigma_times,
-        sigma_values,
-        s0,
-        correlation_matrix,
-        n_paths,
-        n_steps,
-        dt,
-        t_start,
-        seed,
-    )
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    vec3_to_pyarray(py, paths)
+    let paths = py
+        .allow_threads(|| {
+            simulate_gbm_time_varying_correlated(
+                mu_times,
+                mu_values,
+                sigma_times,
+                sigma_values,
+                s0,
+                correlation_matrix,
+                n_paths,
+                n_steps,
+                dt,
+                t_start,
+                seed,
+            )
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(paths.into_pyarray_bound(py))
 }
 
 #[pyfunction]
@@ -210,20 +171,22 @@ fn py_simulate_portfolio(
         .map(|row| row.to_vec())
         .collect();
 
-    let results = simulate_portfolio_losses(
-        &config,
-        &assets,
-        n_simulations,
-        n_periods,
-        period_length,
-        &kernel,
-        factor_phi,
-        &thresholds,
-        seed,
-        store_interim.unwrap_or(false),
-        output_path,
-        batch_size,
-    );
+    let results = py.allow_threads(|| {
+        simulate_portfolio_losses(
+            &config,
+            &assets,
+            n_simulations,
+            n_periods,
+            period_length,
+            &kernel,
+            factor_phi,
+            &thresholds,
+            seed,
+            store_interim.unwrap_or(false),
+            output_path,
+            batch_size,
+        )
+    });
 
     match results {
         Ok(simulation_results) => Ok(simulation_results.to_object(py)),

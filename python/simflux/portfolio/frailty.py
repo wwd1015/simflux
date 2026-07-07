@@ -36,18 +36,46 @@ the independent-period forward-PD thresholds; at ``phi = 1`` the factor is froze
 from __future__ import annotations
 
 from math import erf, sqrt
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
+# Resolve the erf implementation once at import (scipy if present, else math.erf
+# — no hard dep). Calibration evaluates the normal CDF inside a bisection loop,
+# so a per-call import lookup is measurable.
+try:
+    from scipy.special import erf as _erf  # type: ignore
+except ImportError:
+    _erf = np.vectorize(erf)
+
 
 def _norm_cdf(x: np.ndarray) -> np.ndarray:
-    """Vectorized standard-normal CDF (scipy if present, else erf — no hard dep)."""
-    try:
-        from scipy.special import erf as _erf  # type: ignore
-    except ImportError:
-        _erf = np.vectorize(erf)
+    """Vectorized standard-normal CDF."""
     return 0.5 * (1.0 + _erf(np.asarray(x, dtype=float) / sqrt(2.0)))
+
+
+def _factor_grid(
+    phi: float, grid_points: int, grid_limit: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Quadrature grid, weights, and reverse AR(1) kernel shared by the
+    calibration and its deterministic inverse.
+
+    ``T[i, j] = P(F_{k-1} = f_j | F_k = f_i)``.
+    """
+    f = np.linspace(-grid_limit, grid_limit, grid_points)
+    w = np.exp(-0.5 * f**2)
+    w /= w.sum()  # standard-normal quadrature weights
+
+    if phi <= 0.0:
+        T = np.broadcast_to(w, (grid_points, grid_points))  # independent
+    elif phi >= 1.0 - 1e-12:
+        T = np.eye(grid_points)  # frozen
+    else:
+        var = 1.0 - phi * phi
+        diff = f[None, :] - phi * f[:, None]
+        T = np.exp(-0.5 * diff**2 / var)
+        T /= T.sum(axis=1, keepdims=True)
+    return f, w, T
 
 
 def per_period_phi(factor_persistence: float, period_length: float) -> float:
@@ -87,48 +115,81 @@ def calibrate_barriers(
     np.ndarray
         Barriers ``b_0, ..., b_{n-1}`` on the standard-normal latent scale.
     """
-    cum = np.clip(np.asarray(cum_pds, dtype=float), 0.0, 1.0)
-    cum = np.maximum.accumulate(cum)  # defensive: cumulative PD is non-decreasing
-    n = len(cum)
-    if n == 0:
+    cum = np.asarray(cum_pds, dtype=float)
+    if cum.size == 0:
         return np.empty(0)
+    return calibrate_barriers_batch(
+        cum[:, None],
+        np.asarray([rho], dtype=float),
+        phi,
+        grid_points=grid_points,
+        grid_limit=grid_limit,
+        bisection_iters=bisection_iters,
+    )[:, 0]
 
-    rho = float(np.clip(rho, 0.0, 1.0 - 1e-9))
-    sq_rho, sq_1mrho = sqrt(rho), sqrt(1.0 - rho)
+
+def calibrate_barriers_batch(
+    cum_matrix: np.ndarray,
+    rhos: np.ndarray,
+    phi: float,
+    grid_points: int = 301,
+    grid_limit: float = 8.0,
+    bisection_iters: int = 50,
+) -> np.ndarray:
+    """Vectorized :func:`calibrate_barriers` across a whole book of obligors.
+
+    Runs every obligor's per-period bisection simultaneously on the shared
+    factor grid, so the special-function work is a handful of large array
+    operations per bisection step instead of one small one per obligor — the
+    same recursion and root-find as the scalar form, batched.
+
+    Parameters
+    ----------
+    cum_matrix : array, shape (n_periods, n_obligors)
+        Cumulative PD by period end, one column per obligor.
+    rhos : array, shape (n_obligors,)
+        Per-obligor intra-sector correlation.
+    phi : float
+        Per-period AR(1) persistence of the systematic factor.
+    grid_points, grid_limit, bisection_iters :
+        Quadrature/root-find controls.
+
+    Returns
+    -------
+    np.ndarray, shape (n_periods, n_obligors)
+        Barriers on the standard-normal latent scale.
+    """
+    cum = np.clip(np.asarray(cum_matrix, dtype=float), 0.0, 1.0)
+    cum = np.maximum.accumulate(cum, axis=0)  # defensive: cum PD non-decreasing
+    n_periods, n_obligors = cum.shape
+    if n_periods == 0 or n_obligors == 0:
+        return np.empty((n_periods, n_obligors))
+
+    rhos = np.clip(np.asarray(rhos, dtype=float), 0.0, 1.0 - 1e-9)
+    sq_rho = np.sqrt(rhos)[:, None]  # (n_obligors, 1)
+    sq_1mrho = np.sqrt(1.0 - rhos)[:, None]
     phi = float(np.clip(phi, 0.0, 1.0))
 
-    f = np.linspace(-grid_limit, grid_limit, grid_points)
-    w = np.exp(-0.5 * f**2)
-    w /= w.sum()  # standard-normal quadrature weights
+    f, w, T = _factor_grid(phi, grid_points, grid_limit)
 
-    # Reverse AR(1) transition kernel T[i, j] = P(F_{k-1}=f_j | F_k=f_i).
-    if phi <= 0.0:
-        T = np.broadcast_to(w, (grid_points, grid_points))  # independent
-    elif phi >= 1.0 - 1e-12:
-        T = np.eye(grid_points)  # frozen
-    else:
-        var = 1.0 - phi * phi
-        diff = f[None, :] - phi * f[:, None]
-        T = np.exp(-0.5 * diff**2 / var)
-        T /= T.sum(axis=1, keepdims=True)
+    def survival(b: np.ndarray) -> np.ndarray:
+        # One-period survival on the grid, per obligor: (n_obligors, grid).
+        return _norm_cdf((sq_rho * f[None, :] - b[:, None]) / sq_1mrho)
 
-    def survival(b: float) -> np.ndarray:
-        return _norm_cdf((sq_rho * f - b) / sq_1mrho)
-
-    barriers = np.empty(n)
-    psi = np.ones(grid_points)  # psi_{-1} = 1
-    for k in range(n):
-        k_psi = T @ psi
+    barriers = np.empty((n_periods, n_obligors))
+    psi = np.ones((n_obligors, grid_points))  # psi_{-1} = 1
+    for k in range(n_periods):
+        k_psi = psi @ T.T
         target = 1.0 - cum[k]
         # S_k(b) = sum_i w_i * survival_i(b) * k_psi_i, monotone DECREASING in b.
-        lo, hi = -grid_limit, grid_limit
+        lo = np.full(n_obligors, -grid_limit)
+        hi = np.full(n_obligors, grid_limit)
         for _ in range(bisection_iters):
             mid = 0.5 * (lo + hi)
-            s_k = float(np.dot(w, survival(mid) * k_psi))
-            if s_k > target:
-                lo = mid  # survival too high -> raise the barrier
-            else:
-                hi = mid
+            s_k = (survival(mid) * k_psi) @ w
+            too_high = s_k > target  # survival too high -> raise the barrier
+            lo = np.where(too_high, mid, lo)
+            hi = np.where(too_high, hi, mid)
         b_k = 0.5 * (lo + hi)
         barriers[k] = b_k
         psi = survival(b_k) * k_psi
@@ -156,18 +217,7 @@ def survival_curve(
     sq_rho, sq_1mrho = sqrt(rho), sqrt(1.0 - rho)
     phi = float(np.clip(phi, 0.0, 1.0))
 
-    f = np.linspace(-grid_limit, grid_limit, grid_points)
-    w = np.exp(-0.5 * f**2)
-    w /= w.sum()
-    if phi <= 0.0:
-        T = np.broadcast_to(w, (grid_points, grid_points))
-    elif phi >= 1.0 - 1e-12:
-        T = np.eye(grid_points)
-    else:
-        var = 1.0 - phi * phi
-        diff = f[None, :] - phi * f[:, None]
-        T = np.exp(-0.5 * diff**2 / var)
-        T /= T.sum(axis=1, keepdims=True)
+    f, w, T = _factor_grid(phi, grid_points, grid_limit)
 
     out = np.empty(n)
     psi = np.ones(grid_points)
@@ -199,14 +249,26 @@ def barrier_matrix(
         Per-asset, per-period barriers.
     """
     n_periods, n_assets = cum_matrix.shape
-    out = np.empty((n_periods, n_assets))
-    cache: Dict[Tuple, np.ndarray] = {}
+
+    # Deduplicate by (rho, cum-curve) — homogeneous books calibrate once per
+    # distinct profile — then calibrate all distinct profiles in one batch.
+    unique_index: Dict[Tuple, int] = {}
+    representative_cols: List[int] = []
+    scatter = np.empty(n_assets, dtype=np.intp)
     for i in range(n_assets):
-        curve = cum_matrix[:, i]
-        key = (round(float(asset_rhos[i]), 10), tuple(np.round(curve, 12)))
-        b = cache.get(key)
-        if b is None:
-            b = calibrate_barriers(curve, float(asset_rhos[i]), phi)
-            cache[key] = b
-        out[:, i] = b
-    return out
+        key = (
+            round(float(asset_rhos[i]), 10),
+            tuple(np.round(cum_matrix[:, i], 12)),
+        )
+        j = unique_index.get(key)
+        if j is None:
+            j = len(representative_cols)
+            unique_index[key] = j
+            representative_cols.append(i)
+        scatter[i] = j
+
+    rhos = np.asarray(asset_rhos, dtype=float)[representative_cols]
+    unique_barriers = calibrate_barriers_batch(
+        cum_matrix[:, representative_cols], rhos, phi
+    )
+    return unique_barriers[:, scatter]

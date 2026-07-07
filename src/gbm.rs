@@ -1,6 +1,6 @@
 use crate::correlation::{cholesky_decomposition, CorrelationError};
 use crate::random::{create_rng, sample_standard_normal};
-use ndarray::Array3;
+use ndarray::{Array2, Array3};
 use rayon::prelude::*;
 
 /// Linear interpolation with clamping outside the provided time range.
@@ -38,27 +38,32 @@ pub fn simulate_gbm_single(
     n_steps: usize,
     dt: f64,
     seed: Option<u64>,
-) -> Vec<Vec<f64>> {
+) -> Array2<f64> {
     let drift = (mu - 0.5 * sigma * sigma) * dt;
     let vol_sqrt_dt = sigma * dt.sqrt();
 
-    (0..n_paths)
-        .into_par_iter()
-        .map(|path_idx| {
+    // One flat, row-major (n_paths, n_steps+1) buffer written in place: no
+    // per-path Vec allocations and no flattening copy at the FFI boundary.
+    // The per-path RNG stream is unchanged, so seeded output is bit-identical
+    // to the previous nested-Vec implementation.
+    let stride = n_steps + 1;
+    let mut flat = vec![0.0_f64; n_paths * stride];
+    flat.par_chunks_mut(stride)
+        .enumerate()
+        .for_each(|(path_idx, path)| {
             let mut rng = create_rng(seed, path_idx as u64);
-            let mut path = Vec::with_capacity(n_steps + 1);
-            path.push(s0);
+            path[0] = s0;
             let mut current_value = s0;
 
-            for _ in 0..n_steps {
+            for slot in path.iter_mut().skip(1) {
                 let dw = sample_standard_normal(&mut rng);
                 current_value *= (drift + vol_sqrt_dt * dw).exp();
-                path.push(current_value);
+                *slot = current_value;
             }
+        });
 
-            path
-        })
-        .collect()
+    Array2::from_shape_vec((n_paths, stride), flat)
+        .expect("buffer length matches (n_paths, n_steps + 1) by construction")
 }
 
 pub fn simulate_gbm_correlated(
@@ -157,38 +162,42 @@ pub fn simulate_gbm_time_varying_single(
     dt: f64,
     t_start: f64,
     seed: Option<u64>,
-) -> Vec<Vec<f64>> {
-    // Pre-compute mu and sigma at each simulation time step
-    let mu_interp: Vec<f64> = (0..n_steps)
-        .map(|i| linear_interp(t_start + i as f64 * dt, mu_times, mu_values))
-        .collect();
-    let sigma_interp: Vec<f64> = (0..n_steps)
-        .map(|i| linear_interp(t_start + i as f64 * dt, sigma_times, sigma_values))
-        .collect();
-
+) -> Array2<f64> {
+    // Pre-compute the per-step drift and diffusion coefficients once; the
+    // per-path loop then only samples and multiplies.
     let sqrt_dt = dt.sqrt();
+    let drift: Vec<f64> = (0..n_steps)
+        .map(|i| {
+            let t = t_start + i as f64 * dt;
+            let mu = linear_interp(t, mu_times, mu_values);
+            let sigma = linear_interp(t, sigma_times, sigma_values);
+            (mu - 0.5 * sigma * sigma) * dt
+        })
+        .collect();
+    let vol_sqrt_dt: Vec<f64> = (0..n_steps)
+        .map(|i| linear_interp(t_start + i as f64 * dt, sigma_times, sigma_values) * sqrt_dt)
+        .collect();
 
-    (0..n_paths)
-        .into_par_iter()
-        .map(|path_idx| {
+    // Flat (n_paths, n_steps+1) buffer, same rationale (and identical RNG
+    // stream) as simulate_gbm_single.
+    let stride = n_steps + 1;
+    let mut flat = vec![0.0_f64; n_paths * stride];
+    flat.par_chunks_mut(stride)
+        .enumerate()
+        .for_each(|(path_idx, path)| {
             let mut rng = create_rng(seed, path_idx as u64);
-            let mut path = Vec::with_capacity(n_steps + 1);
-            path.push(s0);
+            path[0] = s0;
             let mut current = s0;
 
             for i in 0..n_steps {
-                let mu = mu_interp[i];
-                let sigma = sigma_interp[i];
-                let drift = (mu - 0.5 * sigma * sigma) * dt;
-                let vol_sqrt_dt = sigma * sqrt_dt;
                 let dw = sample_standard_normal(&mut rng);
-                current *= (drift + vol_sqrt_dt * dw).exp();
-                path.push(current);
+                current *= (drift[i] + vol_sqrt_dt[i] * dw).exp();
+                path[i + 1] = current;
             }
+        });
 
-            path
-        })
-        .collect()
+    Array2::from_shape_vec((n_paths, stride), flat)
+        .expect("buffer length matches (n_paths, n_steps + 1) by construction")
 }
 
 pub fn simulate_gbm_time_varying_correlated(
@@ -203,7 +212,7 @@ pub fn simulate_gbm_time_varying_correlated(
     dt: f64,
     t_start: f64,
     seed: Option<u64>,
-) -> Result<Vec<Vec<Vec<f64>>>, CorrelationError> {
+) -> Result<Array3<f64>, CorrelationError> {
     let n_assets = s0.len();
 
     if mu_times.len() != n_assets || mu_values.len() != n_assets {
@@ -236,28 +245,36 @@ pub fn simulate_gbm_time_varying_correlated(
     let cholesky = cholesky_decomposition(correlation_matrix)?;
     let sqrt_dt = dt.sqrt();
 
-    let paths = (0..n_paths)
-        .into_par_iter()
-        .map(|path_idx| {
+    // Flat, row-major (n_paths, n_assets, n_steps+1) buffer written in place,
+    // mirroring simulate_gbm_correlated: one copy of the result, no nested-Vec
+    // intermediate, no flattening copy at the FFI boundary. The RNG stream per
+    // path (n_assets samples per step, in step order) is unchanged, so seeded
+    // output is bit-identical to the previous implementation.
+    let stride = n_steps + 1;
+    let mut flat = vec![0.0_f64; n_paths * n_assets * stride];
+    flat.par_chunks_mut(n_assets * stride)
+        .enumerate()
+        .for_each(|(path_idx, chunk)| {
             let mut rng = create_rng(seed, path_idx as u64);
-            let mut asset_paths = vec![Vec::with_capacity(n_steps + 1); n_assets];
             let mut current_values = s0.clone();
+            let mut independent = vec![0.0_f64; n_assets];
+            let mut correlated = vec![0.0_f64; n_assets];
 
             for a in 0..n_assets {
-                asset_paths[a].push(s0[a]);
+                chunk[a * stride] = s0[a];
             }
 
             for i in 0..n_steps {
-                // Generate independent normals and apply Cholesky
-                let independent: Vec<f64> = (0..n_assets)
-                    .map(|_| sample_standard_normal(&mut rng))
-                    .collect();
+                for z in independent.iter_mut() {
+                    *z = sample_standard_normal(&mut rng);
+                }
 
-                let mut correlated = vec![0.0; n_assets];
                 for a in 0..n_assets {
+                    let mut dw = 0.0;
                     for j in 0..=a {
-                        correlated[a] += cholesky[a][j] * independent[j];
+                        dw += cholesky[a][j] * independent[j];
                     }
+                    correlated[a] = dw;
                 }
 
                 for a in 0..n_assets {
@@ -266,15 +283,13 @@ pub fn simulate_gbm_time_varying_correlated(
                     let drift = (mu - 0.5 * sigma * sigma) * dt;
                     let vol_sqrt_dt = sigma * sqrt_dt;
                     current_values[a] *= (drift + vol_sqrt_dt * correlated[a]).exp();
-                    asset_paths[a].push(current_values[a]);
+                    chunk[a * stride + i + 1] = current_values[a];
                 }
             }
+        });
 
-            asset_paths
-        })
-        .collect();
-
-    Ok(paths)
+    Array3::from_shape_vec((n_paths, n_assets, stride), flat)
+        .map_err(|e| CorrelationError::InvalidMatrix(e.to_string()))
 }
 
 #[cfg(test)]
@@ -285,15 +300,12 @@ mod tests {
     fn test_gbm_single_basic() {
         let paths = simulate_gbm_single(0.05, 0.2, 100.0, 10, 252, 1.0 / 252.0, Some(42));
 
-        assert_eq!(paths.len(), 10);
-        assert_eq!(paths[0].len(), 253); // n_steps + 1
-        assert_eq!(paths[0][0], 100.0); // Starting value
+        assert_eq!(paths.shape(), [10, 253]); // (n_paths, n_steps + 1)
+        assert_eq!(paths[[0, 0]], 100.0); // Starting value
 
         // Check that all values are positive
-        for path in &paths {
-            for &value in path {
-                assert!(value > 0.0);
-            }
+        for &value in paths.iter() {
+            assert!(value > 0.0);
         }
     }
 
@@ -367,13 +379,10 @@ mod tests {
             0.0,
             Some(42),
         );
-        assert_eq!(paths.len(), 10);
-        assert_eq!(paths[0].len(), 51);
-        assert_eq!(paths[0][0], 100.0);
-        for path in &paths {
-            for &v in path {
-                assert!(v > 0.0);
-            }
+        assert_eq!(paths.shape(), [10, 51]);
+        assert_eq!(paths[[0, 0]], 100.0);
+        for &v in paths.iter() {
+            assert!(v > 0.0);
         }
     }
 }

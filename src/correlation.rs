@@ -152,42 +152,30 @@ impl TwoFactorCorrelationStructure {
         })
     }
 
-    pub fn generate_factors(
-        &self,
-        n_simulations: usize,
-        seed: Option<u64>,
-    ) -> Vec<SystematicFactors> {
+    /// Generate one set of correlated sector factors per trial, returned as a
+    /// single contiguous trial-major buffer: entry `trial * n_sectors + s` is
+    /// sector `s`'s factor in `trial`. One flat allocation instead of a boxed
+    /// `Vec` per trial, and the per-trial RNG stream (and therefore every
+    /// seeded value) is identical to the previous per-trial-struct layout.
+    pub fn generate_factors(&self, n_simulations: usize, seed: Option<u64>) -> Vec<f64> {
         let n_sectors = self.sector_sizes.len();
         let cholesky = &self.sector_cholesky;
 
-        (0..n_simulations)
-            .into_par_iter()
-            .map(|sim_idx| {
+        let mut flat = vec![0.0_f64; n_simulations * n_sectors];
+        flat.par_chunks_mut(n_sectors)
+            .enumerate()
+            .for_each(|(sim_idx, sector_factors)| {
                 let mut rng = create_rng(seed, sim_idx as u64);
                 let independent: Vec<f64> = (0..n_sectors)
                     .map(|_| sample_standard_normal(&mut rng))
                     .collect();
 
-                let mut sector_factors = vec![0.0; n_sectors];
                 for i in 0..n_sectors {
                     for j in 0..=i {
                         sector_factors[i] += cholesky[i][j] * independent[j];
                     }
                 }
-
-                SystematicFactors { sector_factors }
-            })
-            .collect()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SystematicFactors {
-    pub sector_factors: Vec<f64>,
-}
-
-impl SystematicFactors {
-    pub fn get_sector_factor(&self, sector_id: usize) -> f64 {
-        self.sector_factors[sector_id]
+            });
+        flat
     }
 }

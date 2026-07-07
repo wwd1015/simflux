@@ -16,10 +16,11 @@ from .portfolio.correlation import TwoFactorCorrelationStructure
 from .portfolio.default_timing import Copula, Frailty
 from .utils.storage import StorageConfig, ParquetResultsAnalyzer
 from .utils.random_utils import set_seed
+from .core.base import SimulationConfig
 from .core.engine import SimulationEngine
 from .core.backend import Backend
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __author__ = "SimFlux Contributors"
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     # Storage and utilities
     "StorageConfig",
     "ParquetResultsAnalyzer",
+    "SimulationConfig",
     "SimulationEngine",
     "Backend",
     "set_seed",

@@ -1,13 +1,13 @@
-use crate::correlation::{SystematicFactors, TwoFactorCorrelationStructure};
+use crate::correlation::TwoFactorCorrelationStructure;
 use crate::math_utils::{
-    beta_mean_var_to_params, calculate_default_threshold, calculate_portfolio_loss_statistics,
-    PortfolioStatistics,
+    beta_inverse_cdf_prepared, beta_mean_var_to_params, calculate_default_threshold,
+    calculate_portfolio_loss_statistics, PortfolioStatistics,
 };
 use crate::random::{create_rng, sample_standard_normal};
 use pyo3::prelude::*;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
-use statrs::distribution::{Beta as StatrsBeta, ContinuousCDF};
+use statrs::function::beta::ln_beta;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -503,9 +503,10 @@ pub fn simulate_portfolio_losses(
     // Generate systematic factors.  The "copula" model freezes a single set
     // across the horizon (one generated); "frailty" draws an independent
     // innovation set per period and then couples them with AR(1) persistence.
-    // factors[period][trial].
+    // all_factors[period] is a flat trial-major buffer (n_trials x n_sectors).
+    let n_sectors = config.sector_names.len();
     let n_factor_sets = if copula { 1 } else { n_periods };
-    let mut all_factors: Vec<Vec<SystematicFactors>> = (0..n_factor_sets)
+    let mut all_factors: Vec<Vec<f64>> = (0..n_factor_sets)
         .map(|period| {
             let period_seed =
                 seed.map(|s| s.wrapping_add((period * n_simulations + 1_000_000) as u64));
@@ -515,31 +516,31 @@ pub fn simulate_portfolio_losses(
 
     // Frailty AR(1): F_k = phi*F_{k-1} + sqrt(1-phi^2)*innovation_k, applied to
     // the pre-generated independent innovations.  Each F_k stays N(0, Sigma).
+    // Walking periods in order preserves the recursion; within a period the
+    // (trial, sector) updates are elementwise over the flat buffers.
     if !copula && factor_phi > 0.0 && n_periods > 1 {
         let sqrt_innov = (1.0 - factor_phi * factor_phi).max(0.0).sqrt();
-        let n_sectors = config.sector_names.len();
-        for trial in 0..n_simulations {
-            for period in 1..n_periods {
-                for s in 0..n_sectors {
-                    let prev = all_factors[period - 1][trial].sector_factors[s];
-                    let innov = all_factors[period][trial].sector_factors[s];
-                    all_factors[period][trial].sector_factors[s] =
-                        factor_phi * prev + sqrt_innov * innov;
-                }
+        for period in 1..n_periods {
+            let (done, rest) = all_factors.split_at_mut(period);
+            let prev = &done[period - 1];
+            for (curr, &prev) in rest[0].iter_mut().zip(prev.iter()) {
+                *curr = factor_phi * prev + sqrt_innov * *curr;
             }
         }
     }
 
+    // Hoist every per-asset constant out of the trial loop; the loop then only
+    // samples, compares, and accumulates.
+    let precomp = precompute_assets(config, assets, &correlation_structure, n_periods)?;
+
     // Run simulations in parallel
-    let n_sectors = config.sector_names.len();
     let trial_results: Vec<TrialResult> = (0..n_simulations)
         .into_par_iter()
         .map(|trial_id| {
             simulate_single_trial(
                 trial_id,
-                config,
                 assets,
-                &correlation_structure,
+                &precomp,
                 &all_factors,
                 thresholds,
                 n_periods,
@@ -550,7 +551,7 @@ pub fn simulate_portfolio_losses(
                 n_sectors,
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
 
     // Calculate statistics
     let total_losses: Vec<f64> = trial_results.iter().map(|t| t.total_loss).collect();
@@ -602,58 +603,106 @@ pub fn simulate_portfolio_losses(
 // Trial simulation (multi-period aware)
 // ---------------------------------------------------------------------------
 
-fn simulate_single_trial(
-    trial_id: usize,
+/// LGD Beta parameters for one (asset, period), with `ln B(alpha, beta)`
+/// precomputed so each quantile draw skips the two `ln_gamma` evaluations.
+struct LgdBeta {
+    alpha: f64,
+    beta: f64,
+    ln_beta_ab: f64,
+}
+
+/// Per-asset constants hoisted out of the trial loop: loadings, LGD coupling,
+/// and the LGD Beta parameters per period.  Deriving the Beta once per
+/// (asset, period) instead of once per default event removes repeated
+/// parameter validation from the hot path; `AssetData::new` already guarantees
+/// feasible Beta parameters, so setup-time failure is the only failure left.
+struct AssetPrecomp {
+    sector_index: usize,
+    sector_loading: f64,
+    idio_loading: f64,
+    lgd_corr: f64,
+    lgd_idio_loading: f64,
+    exposure: f64,
+    /// LGD Beta per period (index clamped by construction via `lgd_mean_at`).
+    betas: Vec<LgdBeta>,
+}
+
+fn precompute_assets(
     config: &PortfolioConfig,
     assets: &[AssetData],
     correlation_structure: &TwoFactorCorrelationStructure,
-    all_factors: &[Vec<SystematicFactors>], // [period][trial]
-    thresholds: &[Vec<f64>],                // [asset][period], from the timing plan (both kernels)
+    n_periods: usize,
+) -> Result<Vec<AssetPrecomp>, PortfolioError> {
+    assets
+        .iter()
+        .map(|asset| {
+            let sector_index = asset.sector_id as usize;
+            let intra_corr = asset
+                .intra_sector_correlation
+                .unwrap_or(correlation_structure.intra_sector_correlations[sector_index]);
+            let lgd_corr = config.systematic_lgd_correlations[sector_index];
+            let variance = asset.lgd_std * asset.lgd_std;
+            let betas = (0..n_periods)
+                .map(|period| {
+                    let (alpha, beta) =
+                        beta_mean_var_to_params(lgd_mean_at(asset, period), variance)
+                            .map_err(|e| PortfolioError::SimulationError(e.to_string()))?;
+                    Ok(LgdBeta {
+                        alpha,
+                        beta,
+                        ln_beta_ab: ln_beta(alpha, beta),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(AssetPrecomp {
+                sector_index,
+                sector_loading: intra_corr.sqrt(),
+                idio_loading: (1.0 - intra_corr).max(0.0).sqrt(),
+                lgd_corr,
+                lgd_idio_loading: (1.0 - lgd_corr.powi(2)).max(0.0).sqrt(),
+                exposure: asset.exposure,
+                betas,
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_single_trial(
+    trial_id: usize,
+    assets: &[AssetData],
+    precomp: &[AssetPrecomp],
+    all_factors: &[Vec<f64>], // [period] -> flat trial-major (n_trials x n_sectors)
+    thresholds: &[Vec<f64>],  // [asset][period], from the timing plan (both kernels)
     n_periods: usize,
     period_length: f64,
     copula: bool,
     seed: Option<u64>,
     store_interim: bool,
     n_sectors: usize,
-) -> Result<TrialResult, PortfolioError> {
+) -> TrialResult {
     let mut rng = create_rng(seed, trial_id as u64);
     let n_assets = assets.len();
 
-    // Per-asset mutable state
-    let mut defaulted = vec![false; n_assets];
-    let mut default_time: Vec<Option<f64>> = vec![None; n_assets];
-    let mut default_period: Vec<u32> = vec![0; n_assets];
-    let mut loss_amounts = vec![0.0_f64; n_assets];
-    let mut recovery_rates = vec![0.0_f64; n_assets];
-    let mut asset_values = vec![0.0_f64; n_assets];
-    let mut factor_sector = vec![0.0_f64; n_assets];
-    let mut factor_idio = vec![0.0_f64; n_assets];
+    let mut total_loss = 0.0;
+    let mut total_defaults = 0u32;
+    let mut sector_losses = vec![0.0_f64; n_sectors];
+    let mut default_events: Vec<DefaultEvent> = Vec::new();
 
     if copula {
         // One-factor Gaussian copula of default times: a single frozen latent
         // per obligor vs the plan's cumulative staircase; default = first
         // crossing. The staircase is non-decreasing per asset (enforced by the
         // TimingPlan), so the final period's threshold is the loosest.
-        let factors = &all_factors[0][trial_id];
-        for (idx, asset) in assets.iter().enumerate() {
-            let sector_index = asset.sector_id as usize;
-            let sector_factor = factors.get_sector_factor(sector_index);
-
-            let intra_corr = asset
-                .intra_sector_correlation
-                .unwrap_or(correlation_structure.intra_sector_correlations[sector_index]);
-            let sector_loading = intra_corr.sqrt();
-            let idio_loading = (1.0 - intra_corr).max(0.0).sqrt();
+        // Defaults are discovered in asset order, so losses accumulate directly
+        // (no per-asset scratch arrays) in the same float order as ever.
+        let factors = &all_factors[0][trial_id * n_sectors..(trial_id + 1) * n_sectors];
+        for (idx, pc) in precomp.iter().enumerate() {
+            let sector_factor = factors[pc.sector_index];
             let idio = sample_standard_normal(&mut rng);
+            let value = pc.sector_loading * sector_factor + pc.idio_loading * idio;
 
-            let value = sector_loading * sector_factor + idio_loading * idio;
-            asset_values[idx] = value;
-            factor_sector[idx] = sector_factor;
-            factor_idio[idx] = idio;
-
-            let threshold_final = thresholds[idx][n_periods - 1];
-            if value <= threshold_final {
-                defaulted[idx] = true;
+            if value <= thresholds[idx][n_periods - 1] {
                 // Default period = first k whose cumulative threshold is crossed.
                 let mut dperiod = n_periods - 1;
                 for k in 0..n_periods {
@@ -662,107 +711,124 @@ fn simulate_single_trial(
                         break;
                     }
                 }
-                default_period[idx] = dperiod as u32;
-                default_time[idx] = Some((dperiod as f64 + 1.0) * period_length);
 
-                let lgd_corr = config.systematic_lgd_correlations[sector_index];
-                match compute_loss(asset, dperiod, sector_factor, lgd_corr, &mut rng) {
-                    Ok((loss, recovery)) => {
-                        loss_amounts[idx] = loss;
-                        recovery_rates[idx] = recovery;
-                    }
-                    Err(e) => return Err(e),
+                let (loss, recovery) = compute_loss(pc, dperiod, sector_factor, &mut rng);
+                total_loss += loss;
+                sector_losses[pc.sector_index] += loss;
+                total_defaults += 1;
+                if store_interim {
+                    let asset = &assets[idx];
+                    default_events.push(DefaultEvent {
+                        asset_id: asset.asset_id,
+                        sector_id: asset.sector_id,
+                        default_period: dperiod as u32,
+                        time_to_default: (dperiod as f64 + 1.0) * period_length,
+                        loss_amount: loss,
+                        recovery_rate: recovery,
+                        asset_value: value,
+                        systematic_factor: sector_factor,
+                        idiosyncratic_factor: idio,
+                        pd: asset.pd,
+                        lgd_mean: asset.lgd_mean,
+                        exposure: asset.exposure,
+                    });
                 }
             }
         }
     } else {
         // Frailty: persistent (already AR(1)-coupled) factor, fresh idiosyncratic
         // each period, first-passage against the plan's calibrated barriers.
-        for period in 0..n_periods {
-            let factors = &all_factors[period][trial_id];
+        // Defaults fire in (period, asset) order but are reduced in asset order
+        // below, keeping the accumulation float-order (and the event order)
+        // identical to the copula branch and to prior releases.
+        let mut defaulted = vec![false; n_assets];
+        let mut loss_amounts = vec![0.0_f64; n_assets];
+        // Event detail is only materialized when interim storage asked for it.
+        let mut detail: Option<FrailtyEventDetail> =
+            store_interim.then(|| FrailtyEventDetail::new(n_assets));
 
-            for (idx, asset) in assets.iter().enumerate() {
+        for period in 0..n_periods {
+            let factors = &all_factors[period][trial_id * n_sectors..(trial_id + 1) * n_sectors];
+
+            for (idx, pc) in precomp.iter().enumerate() {
                 if defaulted[idx] {
                     continue; // already defaulted in an earlier period
                 }
 
-                let sector_index = asset.sector_id as usize;
-                let sector_factor = factors.get_sector_factor(sector_index);
-
-                let intra_corr = asset
-                    .intra_sector_correlation
-                    .unwrap_or(correlation_structure.intra_sector_correlations[sector_index]);
-                let sector_loading = intra_corr.sqrt();
-                let idio_loading = (1.0 - intra_corr).max(0.0).sqrt();
+                let sector_factor = factors[pc.sector_index];
                 let idio = sample_standard_normal(&mut rng);
+                let value = pc.sector_loading * sector_factor + pc.idio_loading * idio;
 
-                let value = sector_loading * sector_factor + idio_loading * idio;
-                asset_values[idx] = value;
-                factor_sector[idx] = sector_factor;
-                factor_idio[idx] = idio;
-
-                let threshold = thresholds[idx][period];
-
-                if value <= threshold {
+                if value <= thresholds[idx][period] {
                     defaulted[idx] = true;
-                    default_period[idx] = period as u32;
-                    default_time[idx] = Some((period as f64 + 1.0) * period_length);
-
-                    let lgd_corr = config.systematic_lgd_correlations[sector_index];
-                    match compute_loss(asset, period, sector_factor, lgd_corr, &mut rng) {
-                        Ok((loss, recovery)) => {
-                            loss_amounts[idx] = loss;
-                            recovery_rates[idx] = recovery;
-                        }
-                        Err(e) => return Err(e),
+                    let (loss, recovery) = compute_loss(pc, period, sector_factor, &mut rng);
+                    loss_amounts[idx] = loss;
+                    if let Some(d) = detail.as_mut() {
+                        d.default_period[idx] = period as u32;
+                        d.recovery_rate[idx] = recovery;
+                        d.asset_value[idx] = value;
+                        d.factor_sector[idx] = sector_factor;
+                        d.factor_idio[idx] = idio;
                     }
+                }
+            }
+        }
+
+        for (idx, pc) in precomp.iter().enumerate() {
+            total_loss += loss_amounts[idx];
+            sector_losses[pc.sector_index] += loss_amounts[idx];
+            if defaulted[idx] {
+                total_defaults += 1;
+                if let Some(d) = detail.as_ref() {
+                    let asset = &assets[idx];
+                    default_events.push(DefaultEvent {
+                        asset_id: asset.asset_id,
+                        sector_id: asset.sector_id,
+                        default_period: d.default_period[idx],
+                        time_to_default: (d.default_period[idx] as f64 + 1.0) * period_length,
+                        loss_amount: loss_amounts[idx],
+                        recovery_rate: d.recovery_rate[idx],
+                        asset_value: d.asset_value[idx],
+                        systematic_factor: d.factor_sector[idx],
+                        idiosyncratic_factor: d.factor_idio[idx],
+                        pd: asset.pd,
+                        lgd_mean: asset.lgd_mean,
+                        exposure: asset.exposure,
+                    });
                 }
             }
         }
     }
 
-    // Reduce to a per-trial summary. Per-sector losses are accumulated here so
-    // the aggregate statistics never need per-asset detail; default events are
-    // materialized only when interim storage was requested.
-    let mut total_loss = 0.0;
-    let mut total_defaults = 0u32;
-    let mut sector_losses = vec![0.0_f64; n_sectors];
-    let mut default_events: Vec<DefaultEvent> = Vec::new();
-
-    for (idx, asset) in assets.iter().enumerate() {
-        total_loss += loss_amounts[idx];
-        let sidx = asset.sector_id as usize;
-        if sidx < n_sectors {
-            sector_losses[sidx] += loss_amounts[idx];
-        }
-        if defaulted[idx] {
-            total_defaults += 1;
-            if store_interim {
-                default_events.push(DefaultEvent {
-                    asset_id: asset.asset_id,
-                    sector_id: asset.sector_id,
-                    default_period: default_period[idx],
-                    time_to_default: default_time[idx].unwrap_or(0.0),
-                    loss_amount: loss_amounts[idx],
-                    recovery_rate: recovery_rates[idx],
-                    asset_value: asset_values[idx],
-                    systematic_factor: factor_sector[idx],
-                    idiosyncratic_factor: factor_idio[idx],
-                    pd: asset.pd,
-                    lgd_mean: asset.lgd_mean,
-                    exposure: asset.exposure,
-                });
-            }
-        }
-    }
-
-    Ok(TrialResult {
+    TrialResult {
         trial_id,
         total_loss,
         total_defaults,
         sector_losses,
         default_events,
-    })
+    }
+}
+
+/// Per-asset default detail for the frailty kernel, kept only while a trial
+/// runs and only when interim storage was requested.
+struct FrailtyEventDetail {
+    default_period: Vec<u32>,
+    recovery_rate: Vec<f64>,
+    asset_value: Vec<f64>,
+    factor_sector: Vec<f64>,
+    factor_idio: Vec<f64>,
+}
+
+impl FrailtyEventDetail {
+    fn new(n_assets: usize) -> Self {
+        Self {
+            default_period: vec![0; n_assets],
+            recovery_rate: vec![0.0; n_assets],
+            asset_value: vec![0.0; n_assets],
+            factor_sector: vec![0.0; n_assets],
+            factor_idio: vec![0.0; n_assets],
+        }
+    }
 }
 
 /// LGD Beta mean for an obligor defaulting in `period`: the term-structure value
@@ -774,37 +840,30 @@ fn lgd_mean_at(asset: &AssetData, period: usize) -> f64 {
     }
 }
 
-/// Compute loss amount and recovery rate for an asset defaulting in `period`.
+/// Compute loss amount and recovery rate for an asset defaulting in `period`,
+/// using the asset's precomputed loadings and per-period LGD Beta.
+#[inline]
 fn compute_loss(
-    asset: &AssetData,
+    pc: &AssetPrecomp,
     period: usize,
     sector_factor: f64,
-    systematic_lgd_correlation: f64,
     rng: &mut StdRng,
-) -> Result<(f64, f64), PortfolioError> {
-    // LGD Beta params from this obligor's mean at the default period (time-varying
-    // LGD when an lgd_term_structure is set) and its constant lgd_std.
-    let variance = asset.lgd_std * asset.lgd_std;
-    let (alpha, beta) = beta_mean_var_to_params(lgd_mean_at(asset, period), variance)
-        .map_err(|e| PortfolioError::SimulationError(e.to_string()))?;
-
+) -> (f64, f64) {
     // Wrong-way risk: a downturn is a LOW sector factor (defaults fire in the
     // low tail of the latent value), so LGD must load on the NEGATIVE of the
     // factor for a positive `systematic_lgd_correlation` to mean "recoveries
     // fall — LGD rises — exactly when defaults cluster".
-    let lgd_sys = -systematic_lgd_correlation * sector_factor;
-    let lgd_idio =
-        (1.0 - systematic_lgd_correlation.powi(2)).max(0.0).sqrt() * sample_standard_normal(rng);
+    let lgd_sys = -pc.lgd_corr * sector_factor;
+    let lgd_idio = pc.lgd_idio_loading * sample_standard_normal(rng);
     let lgd_normal = lgd_sys + lgd_idio;
 
     use crate::math_utils::normal_cdf;
     let lgd_uniform = normal_cdf(lgd_normal).clamp(1e-12, 1.0 - 1e-12);
 
-    let beta_dist =
-        StatrsBeta::new(alpha, beta).map_err(|e| PortfolioError::SimulationError(e.to_string()))?;
-    let lgd_realized = beta_dist.inverse_cdf(lgd_uniform);
+    let lb = &pc.betas[period];
+    let lgd_realized = beta_inverse_cdf_prepared(lb.alpha, lb.beta, lb.ln_beta_ab, lgd_uniform);
 
-    Ok((lgd_realized * asset.exposure, 1.0 - lgd_realized))
+    (lgd_realized * pc.exposure, 1.0 - lgd_realized)
 }
 
 // ---------------------------------------------------------------------------
