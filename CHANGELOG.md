@@ -95,6 +95,25 @@ seeded GBM output bit-identical to v0.6.0.
   honest portfolio-memory picture: the chunked scipy fallback peaks under
   ~2 MB while the Rust backend holds a small size-independent ~15 MB.
 
+### Documentation
+
+- **Full docs sweep to match this release.** `architecture_comparison.md` drops
+  its invented memory table and pre-refactor code excerpt in favor of measured
+  numbers and the current kernel shape; the feature matrix no longer calls the
+  fallback's portfolio statistics "simplified" (the result contract is
+  identical and contract-tested) or claims portfolio memory favors Rust (it
+  favors the chunked fallback). The deployment guide's speedup banner, the
+  README's stale v0.5.0 wheel URLs, and `system_design.md`'s frailty-layer
+  description are updated.
+- **New user-guide section: Reproducibility and Seeding** — per-simulator
+  `SimulationConfig(seed=...)`, what seeding does and does not promise
+  (bit-identical within a backend at any thread count; distribution-level
+  agreement across backends), previously undocumented.
+- **New `docs/roadmap.md`** — prioritized improvement candidates with evidence
+  and trade-offs, including a metrology section (dispersion reporting,
+  environment capture, kernel-vs-end-to-end separation, CI regression gates,
+  parallel-scaling curves, MC-convergence reporting).
+
 ### For contributors
 
 - The Rust `TwoFactorCorrelationStructure::generate_factors` now returns a flat

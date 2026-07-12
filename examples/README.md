@@ -7,6 +7,7 @@ This directory contains runnable examples demonstrating SimFlux functionality.
 ### Standalone Python Scripts
 - **`basic_gbm_example.py`** - Single asset Geometric Brownian Motion simulation
 - **`correlated_assets_example.py`** - Multi-asset correlated simulations
+- **`simple_time_varying_example.py`** - Time-varying drift/volatility GBM
 - **`portfolio_risk_example.py`** - Portfolio loss modeling and risk metrics
 
 ### Run Examples

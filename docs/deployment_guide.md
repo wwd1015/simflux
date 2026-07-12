@@ -10,7 +10,7 @@ This guide shows how to build and deploy SimFlux binary wheels to your internal 
 ✅ **Automatic fallback** to NumPy if binary wheels unavailable  
 ✅ **Cross-platform support** (Linux, macOS, Windows)  
 ✅ **Python 3.12+** (one forward-compatible abi3 wheel per platform)  
-✅ **~2.6–45x faster** with the Rust backend (10–45x for portfolios)  
+✅ **~2.4–49x faster** with the Rust backend (30–49x for portfolios; measured, see docs/performance_benchmarks.md)  
 
 ## Build Process
 
@@ -364,7 +364,7 @@ pip show -f simflux
 This deployment strategy provides:
 
 ✅ **Seamless user experience** - no compilation required  
-✅ **High performance** - ~2.6–45x speedup with the Rust backend  
+✅ **High performance** - ~2.4–49x speedup with the Rust backend  
 ✅ **Compatibility** - automatic NumPy fallback  
 ✅ **Enterprise ready** - internal artifactory deployment  
 ✅ **Cross-platform** - Windows, macOS, Linux support  

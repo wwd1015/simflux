@@ -502,11 +502,59 @@ print(pd.DataFrame(rows))
 
 ---
 
-## 3. Measuring Performance
+## 3. Reproducibility and Seeding
 
-The old `run_benchmark.py` script captured three illustrative tests
-(single-asset GBM, correlated GBM, and portfolio loss). You can now run
-the same measurements inline:
+Every simulator takes a `SimulationConfig`, and its `seed` makes runs
+deterministic:
+
+```python
+import simflux as sf
+
+config = sf.SimulationConfig(seed=42)
+
+gbm = sf.GBM(mu=0.05, sigma=0.2, S0=100, config=config)
+paths_a = gbm.simulate(n_paths=10_000, n_steps=252, T=1.0)
+paths_b = gbm.simulate(n_paths=10_000, n_steps=252, T=1.0)
+assert (paths_a == paths_b).all()  # bit-identical
+
+portfolio = sf.CreditPortfolio.create_sample_portfolio(
+    n_assets_per_sector=50,
+    sectors=["Technology", "Finance"],
+    config=sf.SimulationConfig(seed=7),
+)
+result = portfolio.simulate(n_simulations=10_000)  # deterministic statistics
+```
+
+What seeding does and does not promise:
+
+- **Within a backend, seeded runs are bit-identical** — including under the
+  Rust backend's multi-threading. Each path (or portfolio trial) gets its own
+  deterministic RNG stream derived from `seed + index`, so results do not
+  depend on thread count or scheduling.
+- **Across backends, seeds do not transfer.** The Rust backend (ChaCha12) and
+  the NumPy fallback (PCG64) draw different random streams; a seeded run
+  reproduces on the *same* backend, and the two backends agree in
+  *distribution* (asserted by the cross-validation test suite), not
+  trial-by-trial.
+- **Omitting the seed** gives fresh entropy per run.
+
+`sf.set_seed(...)` also exists as a legacy global-seed API, but per-simulator
+`SimulationConfig(seed=...)` is the recommended, thread-safe spelling.
+
+---
+
+## 4. Measuring Performance
+
+For maintained, repeatable measurements use the two benchmark scripts:
+
+```bash
+python benchmarks/performance_comparison.py   # Rust vs NumPy backends (time + peak RSS)
+python benchmarks/regression_benchmark.py     # this build vs another build (seeded workloads, JSON + --compare)
+```
+
+Measured results and methodology live in
+[`performance_benchmarks.md`](performance_benchmarks.md). For a quick
+interactive feel you can also time calls inline:
 
 ```python
 import time
@@ -544,7 +592,7 @@ print(f"  Sims per second ~ {5_000/t:,.0f}")
 
 ---
 
-## 4. Working Without the Rust Backend
+## 5. Working Without the Rust Backend
 
 SimFlux automatically falls back to NumPy implementations when the Rust
 extension module is unavailable. To verify behaviour in environments
@@ -574,7 +622,7 @@ will be lower, but functionality remains intact.
 
 ---
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 - **Performance seems slow**: Install the Rust-enabled wheel from PyPI or
   run `pip install maturin && maturin develop --release` to build locally.

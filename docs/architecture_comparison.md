@@ -125,14 +125,12 @@ graph TD
 
 **Rust Implementation Highlights:**
 ```rust
-// Efficient two-factor loading (excerpt)
-let sector_factor = systematic_factors.get_sector_factor(sector_index);
-let intra_corr = correlation_structure.intra_sector_correlations[sector_index];
-let sector_loading = intra_corr.sqrt();
-let idio_loading = (1.0 - intra_corr).max(0.0).sqrt();
-let idiosyncratic_factor = sample_standard_normal(rng);
-
-let asset_value = sector_loading * sector_factor + idio_loading * idiosyncratic_factor;
+// Per-asset constants (sector index, loadings, LGD Beta parameters) are
+// precomputed once per run; the trial loop only samples, compares against
+// the plan's thresholds, and accumulates (excerpt)
+let sector_factor = factors[pc.sector_index];
+let idio = sample_standard_normal(&mut rng);
+let value = pc.sector_loading * sector_factor + pc.idio_loading * idio;
 
 // Parallel trial simulation
 let trial_results: Vec<TrialResult> = (0..n_simulations)
@@ -170,47 +168,54 @@ test pins both backends' key sets against `PortfolioResult.__annotations__`.
 
 ## Performance Characteristics
 
-### Memory Usage
+### Speed and memory (measured)
 
-| Component | Rust Backend | NumPy Fallback | Ratio |
-|-----------|-------------|----------------|--------|
-| GBM Paths (1M points) | ~8 MB | ~24 MB | 3x |
-| Correlation Matrix (1000x1000) | ~8 MB | ~16 MB | 2x |
-| Portfolio Results (10K assets) | ~40 MB | ~120 MB | 3x |
+See [`performance_benchmarks.md`](performance_benchmarks.md) for the full
+measured tables and methodology. In short: Rust is ~3–5x faster on single-asset
+GBM (~4x less memory — the fallback materializes randoms/log-returns/cumsum
+intermediates), ~2.4–7x on correlated GBM (memory at parity: both are dominated
+by the identical result array), and ~30–49x on portfolio simulation (where the
+fallback is the memory-lean side: it chunks to <2 MB, while Rust carries a
+size-independent ~15 MB of thread pool + per-trial summaries).
 
 ### Threading Model
 
 | Backend | Threading | Parallelism | GIL Impact |
 |---------|-----------|-------------|------------|
-| **Rust** | Rayon work-stealing | True parallelism | None - releases GIL |
-| **NumPy** | OpenMP (limited) | Limited by GIL | High - single threaded |
+| **Rust** | Rayon work-stealing | True parallelism | None — the GIL is released for the duration of the simulation |
+| **NumPy** | NumPy's own C loops only | Single-threaded orchestration | Holds the GIL between array operations |
 
 ### Algorithmic Differences
 
 #### Random Number Generation
-- **Rust**: Thread-safe RNG with superior statistical properties
+- **Rust**: `StdRng` (ChaCha12), one deterministic stream per path/trial
+  (seed + index), so seeded runs are reproducible at any thread count
 - **NumPy**: `np.random.default_rng` (PCG64) — seeds reproduce within a backend, not across backends
 
 #### Correlation Handling
-- **Rust**: Nalgebra optimized linear algebra with BLAS
-- **NumPy**: NumPy/SciPy with fallback implementations
+- **Rust**: nalgebra Cholesky decomposition (pure Rust), applied inline as a
+  triangular dot product per step
+- **NumPy**: shared `safe_cholesky` (decompose-or-repair), applied as a matrix
+  multiply per step
 
-#### Memory Management
-- **Rust**: Zero-cost abstractions, stack allocation where possible
-- **NumPy**: Python object overhead, garbage collection pauses
+#### Special Functions
+- **Rust**: Beta LGD quantile via a bracketed Newton solver on the regularized
+  incomplete beta (unit-tested against `scipy.stats.beta.ppf` at 1e-10)
+- **NumPy**: scipy's `betaincinv` when installed; an accurate tabulated
+  inversion otherwise
 
 ## Feature Completeness Matrix
 
 | Feature | Rust Backend | NumPy Fallback | Notes |
 |---------|-------------|----------------|--------|
 | **GBM Simulation** | ✅ Full | ✅ Full | Equivalent functionality |
-| **Correlated GBM** | ✅ Full | ✅ Full | NumPy uses fallback Cholesky |
-| **Portfolio Simulation** | ✅ Full | ⚠️ Simplified | Limited statistics |
-| **Interim Results** | ✅ Parquet | ❌ None | No storage in fallback |
+| **Correlated GBM** | ✅ Full | ✅ Full | Both consume the shared validated `CorrelationMatrix`; NumPy applies `safe_cholesky` |
+| **Portfolio Simulation** | ✅ Full | ✅ Full | Identical result contract — a test pins both backends' keys against `PortfolioResult.__annotations__` |
+| **Interim Results** | ✅ Parquet | ❌ None | Fallback warns and proceeds without persistence |
 | **Multi-threading** | ✅ Full | ❌ Limited | GIL constraints |
-| **Memory Efficiency** | ✅ Comparable to lower | ⚠️ Baseline | portfolios ~8–25x leaner in Rust |
-| **Error Handling** | ✅ Comprehensive | ⚠️ Basic | Simplified validation |
-| **Statistical Functions** | ✅ Full precision | ⚠️ Approximations | Some approximations used |
+| **Memory Efficiency** | ✅ GBM ~4x leaner | ✅ Portfolios leaner (chunked) | See measured tables in `performance_benchmarks.md` |
+| **Validation** | ✅ Shared | ✅ Shared | Parameter invariants live once in `core/validation.py`; both seams call them |
+| **Statistical Functions** | ✅ Machine precision | ✅ Machine precision with scipy | Without scipy, only the normal quantile is approximated (Beta inverse is an accurate tabulated inversion) |
 
 ## Dependency Requirements
 
@@ -227,7 +232,7 @@ pyarrow>=18.0
 ```toml
 # Same core dependencies
 # Optional: scipy (with pure NumPy fallbacks available)
-scipy>=1.7.0  # Optional for better statistical functions
+scipy>=1.14.0  # Optional — exact normal quantile; also the `full` extra
 ```
 
 ## Decision Matrix: When to Use Which Backend
@@ -236,7 +241,7 @@ scipy>=1.7.0  # Optional for better statistical functions
 - ✅ **Performance critical** applications
 - ✅ **Large-scale simulations** (>10K paths)
 - ✅ **Production environments** with high throughput requirements
-- ✅ **Memory constrained** environments
+- ✅ **Memory constrained** GBM workloads (portfolio memory is small either way)
 - ✅ **Interim results analysis** needed
 - ✅ **Binary wheels available** from artifactory
 

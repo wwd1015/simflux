@@ -77,7 +77,7 @@ SimFlux uses a hybrid Python/Rust architecture:
 - `PortfolioInputs`: the backend seam's whole input contract — per-obligor arrays, the `TimingPlan`, the validated `CorrelationMatrix`, run/storage parameters — assembled once per `simulate()` and self-validating (shape and plan/period consistency), so the two backend adapters cannot drift apart
 
 ### portfolio/frailty.py
-- Pure-function calibration layer behind `Frailty.plan()`: `calibrate_barriers` (1-D Markov forward recursion + bisection), `barrier_matrix` (per-book, cached by `(rho, curve)`), `per_period_phi`, and `survival_curve` — the deterministic inverse the calibration tests pin
+- Pure-function calibration layer behind `Frailty.plan()`: `calibrate_barriers_batch` (1-D Markov forward recursion + bisection, vectorized across obligors; the scalar `calibrate_barriers` is a single-column wrapper), `barrier_matrix` (per-book: dedupes by `(rho, curve)`, batch-calibrates the distinct profiles), `per_period_phi`, and `survival_curve` — the deterministic inverse the calibration tests pin
 
 ### portfolio/correlation.py
 - `TwoFactorCorrelationStructure`: standalone **diagnostics/inspection** helper — builds the full asset correlation matrix, factor loadings, and sampled sector factors for examination. It is **not** on the simulation hot path (each backend computes loadings/factors inline); treat its output as diagnostics, not a guarantee of bit-for-bit agreement with a run.
