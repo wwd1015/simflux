@@ -1,6 +1,8 @@
 """Random number generation utilities and correlation matrix helpers."""
 
 import numpy as np
+
+from ..exceptions import ValidationError
 from typing import Dict, List, Optional
 import random
 
@@ -43,10 +45,10 @@ def generate_correlation_matrix(
     rng = np.random.default_rng(random_state)
 
     if not 0 <= correlation_strength <= 1:
-        raise ValueError("correlation_strength must be between 0 and 1")
+        raise ValidationError("correlation_strength must be between 0 and 1")
 
     if n < 2:
-        raise ValueError("n must be at least 2")
+        raise ValidationError("n must be at least 2")
 
     A = rng.normal(0, 1, (n, n))
     A = (A + A.T) / 2
@@ -190,7 +192,7 @@ def safe_cholesky(matrix: np.ndarray, name: str = "correlation_matrix") -> np.nd
         eigenvals = np.maximum(eigenvals, CORRELATION_TOLERANCE)
         factor = eigenvecs @ np.diag(np.sqrt(eigenvals))
         if not np.all(np.isfinite(factor)):
-            raise ValueError(
+            raise ValidationError(
                 f"{name} could not be decomposed: it is not positive semi-definite"
             )
         return factor
@@ -355,24 +357,24 @@ def validate_correlation_matrix_strict(
         Threshold for eigenvalue positivity check.
     """
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"{name} must be square")
+        raise ValidationError(f"{name} must be square")
 
     if not np.allclose(matrix, matrix.T, atol=CORRELATION_TOLERANCE):
-        raise ValueError(f"{name} must be symmetric")
+        raise ValidationError(f"{name} must be symmetric")
 
     if not np.allclose(np.diag(matrix), 1.0, atol=CORRELATION_TOLERANCE):
-        raise ValueError(f"{name} diagonal must be 1.0")
+        raise ValidationError(f"{name} diagonal must be 1.0")
 
     if np.any(np.abs(matrix) > 1.0 + CORRELATION_TOLERANCE):
-        raise ValueError(f"{name} values must be between -1 and 1")
+        raise ValidationError(f"{name} values must be between -1 and 1")
 
     eigenvals = np.linalg.eigvals(matrix)
     if check_positive_definite:
         if np.any(eigenvals <= pd_tolerance):
-            raise ValueError(f"{name} must be positive definite")
+            raise ValidationError(f"{name} must be positive definite")
     else:
         if np.any(eigenvals < -pd_tolerance):
-            raise ValueError(f"{name} must be positive semi-definite")
+            raise ValidationError(f"{name} must be positive semi-definite")
 
 
 def correlation_matrix_diagnostics(matrix: np.ndarray) -> Dict[str, bool]:

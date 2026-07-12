@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, List, Optional, Sequence
 
 import numpy as np
 
+from ..exceptions import ValidationError
+
 from ..core.base import SimulationConfig
 from ..utils.random_utils import CorrelationMatrix
 from .default_timing import TimingPlan
@@ -56,18 +58,18 @@ class PortfolioInputs:
     def __post_init__(self) -> None:
         n_assets = len(self.assets)
         if self.n_simulations <= 0:
-            raise ValueError("n_simulations must be positive")
+            raise ValidationError("n_simulations must be positive")
         if self.n_periods <= 0:
-            raise ValueError("n_periods must be positive")
+            raise ValidationError("n_periods must be positive")
         if self.period_length <= 0:
-            raise ValueError("period_length must be positive")
+            raise ValidationError("period_length must be positive")
         n_sectors = len(self.sector_names)
         if len(self.intra_sector_correlations) != n_sectors:
-            raise ValueError(
+            raise ValidationError(
                 f"intra_sector_correlations must have one value per sector ({n_sectors})"
             )
         if len(self.systematic_lgd_correlations) != n_sectors:
-            raise ValueError(
+            raise ValidationError(
                 f"systematic_lgd_correlations must have one value per sector ({n_sectors})"
             )
         # Freeze the per-obligor arrays (defensive copies) so a hand-built
@@ -84,12 +86,12 @@ class PortfolioInputs:
             arr.setflags(write=False)
             object.__setattr__(self, name, arr)
         if self.plan.thresholds.shape != (self.n_periods, n_assets):
-            raise ValueError(
+            raise ValidationError(
                 f"timing plan thresholds shape {self.plan.thresholds.shape} must be "
                 f"(n_periods, n_assets) = ({self.n_periods}, {n_assets})"
             )
         if self.lgd_means_by_period.shape != (self.n_periods, n_assets):
-            raise ValueError(
+            raise ValidationError(
                 f"lgd_means_by_period shape {self.lgd_means_by_period.shape} must be "
                 f"(n_periods, n_assets) = ({self.n_periods}, {n_assets})"
             )
@@ -100,9 +102,11 @@ class PortfolioInputs:
             "asset_exposures",
         ):
             if len(getattr(self, name)) != n_assets:
-                raise ValueError(f"{name} must have one value per asset ({n_assets})")
+                raise ValidationError(
+                    f"{name} must have one value per asset ({n_assets})"
+                )
         if self.sector_correlation.n != len(self.sector_names):
-            raise ValueError(
+            raise ValidationError(
                 "sector_correlation must match the number of sectors "
                 f"({len(self.sector_names)})"
             )

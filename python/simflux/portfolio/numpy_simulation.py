@@ -29,6 +29,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from ..core.base import check_memory
+from ..exceptions import ValidationError
 from .inputs import PortfolioInputs
 
 # Max f64 elements in one dense (chunk, n_assets) scratch array. The reduction
@@ -94,7 +95,7 @@ def simulate_portfolio_numpy(inputs: PortfolioInputs) -> Dict[str, Any]:
     n_assets = len(asset_sector_ids)
     n_sectors = len(sector_names)
     if n_sectors == 0:
-        raise ValueError("Portfolio must contain at least one sector")
+        raise ValidationError("Portfolio must contain at least one sector")
 
     # Retained outputs are O(n_simulations * n_sectors) (per-trial total and
     # per-sector loss); dense per-chunk scratch is bounded independently of

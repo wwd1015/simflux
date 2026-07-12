@@ -121,6 +121,21 @@ class TestStorageIntegration:
         import psutil
         import gc
 
+        # Warm up the whole storage path once before measuring: polars loads
+        # lazily on first analyzer use (see utils/_lazy.py) and its first
+        # operation also initializes its thread pool and Parquet reader, so
+        # without a warmup those one-time costs land inside the measured
+        # storage phase and dwarf the per-row memory this test is about.
+        pytest.importorskip("polars")
+        with tempfile.TemporaryDirectory() as warmup_dir:
+            portfolio.simulate(
+                n_simulations=10,
+                storage_config=sf.StorageConfig(
+                    store_interim=True,
+                    output_path=os.path.join(warmup_dir, "warmup.parquet"),
+                ),
+            )
+
         process = psutil.Process()
 
         # Run without storage
@@ -153,9 +168,13 @@ class TestStorageIntegration:
                 mem_after_storage = process.memory_info().rss
                 mem_used_storage = mem_after_storage - mem_before_storage
 
-                # Storage shouldn't use dramatically more memory (< 5x increase)
-                memory_ratio = mem_used_storage / max(mem_used_no_storage, 1)
-                assert memory_ratio < 5.0
+                # Storage must not materialize per-row memory: for a 50-asset,
+                # 50-trial run the interim path should add at most a few MB
+                # (write buffers), not a dense grid. An absolute bound is used
+                # because both phases' RSS deltas are near the allocator's
+                # noise floor once warm, so a ratio would divide noise by
+                # noise (the pre-0.7.0 ratio assertion passed only by luck).
+                assert mem_used_storage - mem_used_no_storage < 50 * 1024 * 1024
 
             except RuntimeError:
                 # Storage not implemented - that's fine for this test

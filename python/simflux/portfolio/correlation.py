@@ -16,6 +16,8 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
+from ..exceptions import ValidationError
+
 from ..utils.random_utils import CorrelationMatrix, correlation_matrix_diagnostics
 
 
@@ -64,7 +66,7 @@ class TwoFactorCorrelationStructure:
             self.sector_names = [f"Sector {i}" for i in range(len(self.sector_sizes))]
         else:
             if len(sector_names) != len(self.sector_sizes):
-                raise ValueError("sector_names must match number of sectors")
+                raise ValidationError("sector_names must match number of sectors")
             self.sector_names = list(sector_names)
 
         self.n_sectors = len(self.sector_sizes)
@@ -82,20 +84,22 @@ class TwoFactorCorrelationStructure:
     # ------------------------------------------------------------------
     def _validate_inputs(self) -> None:
         if not -1.0 <= self.inter_sector_correlation <= 1.0:
-            raise ValueError("inter_sector_correlation must be between -1 and 1")
+            raise ValidationError("inter_sector_correlation must be between -1 and 1")
 
         if len(self.intra_sector_correlations) != len(self.sector_sizes):
-            raise ValueError(
+            raise ValidationError(
                 "intra_sector_correlations and sector_sizes must have same length"
             )
 
         for corr in self.intra_sector_correlations:
             if not -1.0 <= corr <= 1.0:
-                raise ValueError("intra_sector_correlations must be between -1 and 1")
+                raise ValidationError(
+                    "intra_sector_correlations must be between -1 and 1"
+                )
 
         for size in self.sector_sizes:
             if size <= 0:
-                raise ValueError("All sector sizes must be positive")
+                raise ValidationError("All sector sizes must be positive")
 
     def _build_sector_correlation_matrix(
         self, sector_correlation_matrix: Optional[Sequence[Sequence[float]]]
@@ -107,7 +111,7 @@ class TwoFactorCorrelationStructure:
         else:
             matrix = np.asarray(sector_correlation_matrix, dtype=float)
             if matrix.shape != (n, n):
-                raise ValueError(
+                raise ValidationError(
                     "sector_correlation_matrix must match number of sectors"
                 )
 

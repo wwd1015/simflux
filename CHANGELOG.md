@@ -74,6 +74,19 @@ seeded GBM output bit-identical to v0.6.0.
 
 ### Added
 
+- **Typed exception hierarchy** (`simflux.exceptions`, exported at top level):
+  `SimfluxError` → `ValidationError` (also a `ValueError`), `BackendError`
+  (also a `RuntimeError`), `MemoryLimitError` (also a `MemoryError`). One
+  `except SimfluxError` now catches anything SimFlux raises deliberately,
+  while existing `except ValueError`/`RuntimeError`/`MemoryError` code keeps
+  working. One deliberate type correction: a `pd_term_structure` shorter than
+  `n_periods` now raises `ValidationError` (it is a parameter problem;
+  previously `RuntimeError`).
+- **Parallel-scaling mode** (`regression_benchmark.py --scaling`): sweeps
+  `RAYON_NUM_THREADS` over 1/2/N in fresh subprocesses and reports parallel
+  efficiency per kernel. First measurement: portfolio 95% and correlated GBM
+  86% efficient at 4 threads; single-asset GBM ~68% (memory-bandwidth-bound
+  writing its result buffer).
 - **Property-based tests** (`tests/test_properties.py`, hypothesis,
   derandomized): invariants over arbitrary valid inputs — random
   positive-definite correlation matrices factor exactly; the scipy-free

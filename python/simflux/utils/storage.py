@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional, List, Dict, Union
 from dataclasses import dataclass
 
 from ._lazy import LazyModule
+from ..exceptions import ValidationError
 
 # polars is deferred to first use (it backs only ParquetResultsAnalyzer) so
 # `import simflux` doesn't pay its import cost; pandas appears in annotations
@@ -42,7 +43,7 @@ class StorageConfig:
 
     def __post_init__(self) -> None:
         if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
+            raise ValidationError("batch_size must be positive")
 
 
 class Columns:

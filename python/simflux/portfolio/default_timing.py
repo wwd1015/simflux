@@ -32,6 +32,7 @@ from typing import Any, ClassVar, Dict, Literal, Optional, Union
 import numpy as np
 
 from ..utils.random_utils import approx_norm_ppf
+from ..exceptions import ValidationError
 
 Kernel = Literal["copula", "frailty"]
 _KERNELS = ("copula", "frailty")
@@ -65,14 +66,14 @@ def _clean_cumulative_pds(cumulative_pds: np.ndarray) -> np.ndarray:
     """
     cum = np.asarray(cumulative_pds, dtype=float)
     if cum.ndim != 2:
-        raise ValueError(
+        raise ValidationError(
             f"cumulative_pds must be (n_periods, n_assets), got ndim={cum.ndim}"
         )
     # Reject NaN here, once, for every timing model: np.clip would propagate it,
     # the copula plan would fail late, and the frailty calibration would silently
     # converge to "never defaults" — one loud error site instead.
     if np.isnan(cum).any():
-        raise ValueError("cumulative_pds must not contain NaN")
+        raise ValidationError("cumulative_pds must not contain NaN")
     return np.maximum.accumulate(np.clip(cum, 0.0, 1.0), axis=0)
 
 
@@ -98,24 +99,24 @@ class TimingPlan:
 
     def __post_init__(self) -> None:
         if self.kernel not in _KERNELS:
-            raise ValueError(
+            raise ValidationError(
                 f"kernel must be one of {_KERNELS}, got {self.kernel!r} — new "
                 "kernels require an inner loop in both backends (see ADR-0002)"
             )
         t = np.array(self.thresholds, dtype=float, copy=True)
         if t.ndim != 2:
-            raise ValueError(
+            raise ValidationError(
                 f"thresholds must be (n_periods, n_assets), got ndim={t.ndim}"
             )
         if np.isnan(t).any():
-            raise ValueError("thresholds must not contain NaN")
+            raise ValidationError("thresholds must not contain NaN")
         if not 0.0 <= self.factor_phi <= 1.0:
-            raise ValueError(
+            raise ValidationError(
                 f"factor_phi must be between 0 and 1, got {self.factor_phi}"
             )
         if self.kernel == "copula":
             if self.factor_phi != 0.0:
-                raise ValueError("the copula kernel implies factor_phi == 0.0")
+                raise ValidationError("the copula kernel implies factor_phi == 0.0")
             # ±inf endpoints (cum PD of exactly 0/1) make diff produce NaN for
             # repeated infinities; NaN compares False, which is the right answer —
             # errstate suppresses the spurious invalid-subtract warning so a
@@ -123,7 +124,7 @@ class TimingPlan:
             with np.errstate(invalid="ignore"):
                 staircase_decreases = np.any(np.diff(t, axis=0) < 0.0)
             if staircase_decreases:
-                raise ValueError(
+                raise ValidationError(
                     "copula thresholds must be non-decreasing down each column "
                     "(the cumulative-PD staircase)"
                 )
@@ -175,10 +176,10 @@ class DefaultTiming(ABC):
         period_length: float,
     ) -> None:
         if period_length <= 0:
-            raise ValueError("period_length must be positive")
+            raise ValidationError("period_length must be positive")
         n_assets = np.asarray(cumulative_pds).shape[-1]
         if len(np.asarray(intra_correlations)) != n_assets:
-            raise ValueError(
+            raise ValidationError(
                 "intra_correlations must have one value per asset "
                 f"({n_assets}), got {len(np.asarray(intra_correlations))}"
             )
@@ -227,7 +228,7 @@ class Frailty(DefaultTiming):
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.persistence <= 1.0:
-            raise ValueError(
+            raise ValidationError(
                 f"factor_persistence must be between 0 and 1, got {self.persistence}"
             )
 
@@ -270,7 +271,7 @@ def resolve_timing(
     """
     if isinstance(spec, DefaultTiming):
         if factor_persistence is not None:
-            raise ValueError(
+            raise ValidationError(
                 "factor_persistence cannot be combined with a timing object; "
                 "set it on the object instead (e.g. Frailty(persistence=...))"
             )
@@ -289,7 +290,7 @@ def resolve_timing(
             if factor_persistence is not None:
                 return Frailty(persistence=factor_persistence)
             return Frailty()
-    raise ValueError(
+    raise ValidationError(
         "default_timing must be 'copula', 'frailty', or a timing object "
         f"(e.g. Frailty(persistence=0.7)); got {spec!r}"
     )

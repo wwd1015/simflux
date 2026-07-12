@@ -58,12 +58,14 @@ the marginal cumulative PD for arbitrary curves, correlations, persistences,
 and grids. Remaining extension: loss-statistics coherence (ES ≥ VaR) needs the
 stats helper lifted out of `simulate_portfolio_numpy` to be directly testable.
 
-### Q2. Typed exception taxonomy
-Errors surface as `ValueError`/`RuntimeError` with good messages but no types;
-callers can't catch "invalid correlation matrix" separately from "backend
-failure". A small hierarchy (`SimfluxError` → `ValidationError`,
-`BackendError`, `StorageError`) is API-additive if the new types subclass the
-current ones.
+### Q2. Typed exception taxonomy — **done (0.7.0)**
+`simflux.exceptions`: `SimfluxError` → `ValidationError` (also a
+`ValueError`), `BackendError` (also a `RuntimeError`), `MemoryLimitError`
+(also a `MemoryError`) — every deliberate raise site routed, exported at top
+level, and pinned by `tests/test_exceptions.py`. Backward-compatible except
+one deliberate correction: an under-specified horizon
+(`pd_term_structure` shorter than `n_periods`) is now `ValidationError`, not
+`RuntimeError` — it is a parameter problem.
 
 ### Q3. mypy strict tightening
 Tracked in `pyproject.toml` already: the codebase passes non-strict mypy;
@@ -116,11 +118,14 @@ regressions of the median. Cloud runners are noisy — gate on the median across
 repeats and require two consecutive failing runs before flagging, or use a
 dedicated self-hosted runner for stable numbers.
 
-### M5. Parallel-scaling curve
-Report throughput at 1, 2, and N threads (`RAYON_NUM_THREADS`) so parallel
-efficiency is visible — a kernel that stops scaling is a finding the current
-single-configuration numbers can't show. Normalize throughput as samples/sec
-(paths × steps / time) so sizes are comparable.
+### M5. Parallel-scaling curve — **done (0.7.0)**
+`regression_benchmark.py --scaling` sweeps `RAYON_NUM_THREADS` over 1, 2, N
+(fresh subprocess per count — the pool initializes once) and reports parallel
+efficiency `T(1)/(t·T(t))` per kernel, with instability flags carried
+through. First run's finding: the portfolio (95%) and correlated-GBM (86%)
+kernels scale near-perfectly at 4 threads, while single-asset GBM drops to
+~68% — it is memory-bandwidth-bound writing its large result buffer, which
+bounds what any further CPU-side optimization there can return.
 
 ### M6. Statistical-accuracy metrology
 Speed is half the measurement; the other half is MC error. Add a convergence

@@ -225,6 +225,78 @@ def compare(before_path: str, after_path: str) -> None:
             print(f"{name:50s} {b:8.4f}s {a:8.4f}s {b / a:7.2f}x{flag}")
 
 
+# Workloads used for the --scaling sweep: the parallel Rust kernels (the GBM
+# and portfolio trial loops parallelize over paths/trials via Rayon; the
+# calibration-heavy frailty workload is excluded because its Python share
+# would dilute the parallel-efficiency signal).
+SCALING_BENCHES = [
+    "gbm_50k_paths_252_steps",
+    "correlated_gbm_10_assets_10k_paths",
+    "portfolio_1000_assets_10k_trials_1_period",
+]
+
+
+def run_subset(output_path: str, names: list) -> None:
+    """Run only the named benches (used by the --scaling child processes)."""
+    results = {}
+    for name in names:
+        results[name] = BENCHES[name]()
+    with open(output_path, "w") as f:
+        json.dump(results, f)
+
+
+def scaling(max_threads: int) -> None:
+    """Measure parallel scaling: throughput at 1, 2, ..., N Rayon threads.
+
+    RAYON_NUM_THREADS must be set before the thread pool initializes, so each
+    thread count runs in a fresh subprocess. Parallel efficiency is
+    ``T(1) / (t * T(t))`` — 100% means perfect scaling; a kernel whose
+    efficiency collapses has stopped scaling, which single-configuration
+    numbers cannot show.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    thread_counts = sorted({1, 2, max_threads} | {max_threads})
+    thread_counts = [t for t in thread_counts if 1 <= t <= max_threads]
+
+    measured: dict[int, dict] = {}
+    for t in thread_counts:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            out = tmp.name
+        env = dict(os.environ, RAYON_NUM_THREADS=str(t))
+        print(f"measuring with RAYON_NUM_THREADS={t} ...", flush=True)
+        subprocess.run(
+            [
+                sys.executable,
+                os.path.abspath(__file__),
+                out,
+                "--subset",
+                ",".join(SCALING_BENCHES),
+            ],
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+        with open(out) as f:
+            measured[t] = json.load(f)
+        os.unlink(out)
+
+    print(f"\n{'benchmark':45s} " + "".join(f"{t:>7d}T" for t in thread_counts))
+    for name in SCALING_BENCHES:
+        row = [measured[t][name]["median_s"] for t in thread_counts]
+        print(f"{name:45s} " + "".join(f"{v:7.3f}s" for v in row))
+        t1 = row[0]
+        effs = [t1 / (t * v) if v > 0 else 0.0 for t, v in zip(thread_counts, row)]
+        print(f"{'  parallel efficiency':45s} " + "".join(f"{e:7.0%} " for e in effs))
+        unstable = [
+            t for t in thread_counts if measured[t][name].get("unstable", False)
+        ]
+        if unstable:
+            print(f"{'  UNSTABLE at':45s} {unstable} — treat this row as noise")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", nargs="?", default="regression_results.json")
@@ -234,9 +306,22 @@ def main():
         metavar=("BEFORE", "AFTER"),
         help="compare two saved result files instead of running",
     )
+    parser.add_argument(
+        "--subset",
+        help="comma-separated bench names to run (used by --scaling children)",
+    )
+    parser.add_argument(
+        "--scaling",
+        action="store_true",
+        help="sweep RAYON_NUM_THREADS (1, 2, N) and report parallel efficiency",
+    )
     args = parser.parse_args()
     if args.compare:
         compare(*args.compare)
+    elif args.scaling:
+        scaling(os.cpu_count() or 1)
+    elif args.subset:
+        run_subset(args.output, args.subset.split(","))
     else:
         run(args.output)
 

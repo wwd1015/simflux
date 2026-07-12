@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     import pandas as pd
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.backend import Backend
+from ..exceptions import BackendError, ValidationError
 from ..utils.storage import StorageConfig, ParquetResultsAnalyzer
 from ..utils.random_utils import CorrelationMatrix
 from .default_timing import DefaultTiming, resolve_timing
@@ -80,39 +81,41 @@ class AssetData:
     def __post_init__(self) -> None:
         """Validate asset data after initialization."""
         if not 0 <= self.pd <= 1:
-            raise ValueError(f"PD must be between 0 and 1, got {self.pd}")
+            raise ValidationError(f"PD must be between 0 and 1, got {self.pd}")
 
         if not 0 <= self.lgd_mean <= 1:
-            raise ValueError(f"LGD mean must be between 0 and 1, got {self.lgd_mean}")
+            raise ValidationError(
+                f"LGD mean must be between 0 and 1, got {self.lgd_mean}"
+            )
 
         if self.lgd_std <= 0:
-            raise ValueError(f"LGD std must be positive, got {self.lgd_std}")
+            raise ValidationError(f"LGD std must be positive, got {self.lgd_std}")
 
         if self.exposure < 0:
-            raise ValueError(f"Exposure must be non-negative, got {self.exposure}")
+            raise ValidationError(f"Exposure must be non-negative, got {self.exposure}")
 
         if self.intra_sector_correlation is not None:
             if not 0 <= self.intra_sector_correlation <= 1:
-                raise ValueError(
+                raise ValidationError(
                     f"intra_sector_correlation must be between 0 and 1, got {self.intra_sector_correlation}"
                 )
 
         if self.pd_term_structure is not None:
             for i, p in enumerate(self.pd_term_structure):
                 if not 0 <= p <= 1:
-                    raise ValueError(
+                    raise ValidationError(
                         f"pd_term_structure[{i}] must be between 0 and 1, got {p}"
                     )
             for i in range(1, len(self.pd_term_structure)):
                 if self.pd_term_structure[i] < self.pd_term_structure[i - 1] - 1e-10:
-                    raise ValueError(
+                    raise ValidationError(
                         "pd_term_structure must be non-decreasing (cumulative PDs)"
                     )
 
         # Validate Beta distribution parameters are feasible
         max_lgd_std = sqrt(self.lgd_mean * (1 - self.lgd_mean))
         if self.lgd_std >= max_lgd_std:
-            raise ValueError(
+            raise ValidationError(
                 f"lgd_std ({self.lgd_std:.4f}) must be less than "
                 f"sqrt(lgd_mean * (1 - lgd_mean)) = {max_lgd_std:.4f} "
                 f"for valid Beta distribution parameters"
@@ -124,11 +127,11 @@ class AssetData:
         if self.lgd_term_structure is not None:
             for i, m in enumerate(self.lgd_term_structure):
                 if not 0 <= m <= 1:
-                    raise ValueError(
+                    raise ValidationError(
                         f"lgd_term_structure[{i}] must be between 0 and 1, got {m}"
                     )
                 if self.lgd_std >= sqrt(m * (1 - m)):
-                    raise ValueError(
+                    raise ValidationError(
                         f"lgd_std ({self.lgd_std:.4f}) is infeasible for "
                         f"lgd_term_structure[{i}] mean {m:.4f} "
                         f"(must be < sqrt(mean*(1-mean)) = {sqrt(m * (1 - m)):.4f})"
@@ -165,7 +168,7 @@ class AssetData:
         ]
         missing_columns = set(required_columns) - set(df.columns)
         if missing_columns:
-            raise ValueError(f"Missing required columns: {missing_columns}")
+            raise ValidationError(f"Missing required columns: {missing_columns}")
 
         # Free here: the caller handed us a DataFrame, so pandas is loaded.
         import pandas as pd
@@ -179,7 +182,7 @@ class AssetData:
             sector_name = str(row["sector"])
             sector_id = sector_mapping.get(sector_name)
             if sector_id is None:
-                raise ValueError(f"Unknown sector: {sector_name}")
+                raise ValidationError(f"Unknown sector: {sector_name}")
 
             intra_corr = None
             if "intra_sector_correlation" in df.columns:
@@ -307,7 +310,7 @@ class CreditPortfolio(BaseSimulator):
             self.assets = cast(List[AssetData], assets)
 
         if not self.assets:
-            raise ValueError("No assets provided")
+            raise ValidationError("No assets provided")
 
         # Build sector information
         self.sector_names = sorted(
@@ -336,7 +339,7 @@ class CreditPortfolio(BaseSimulator):
                 for sector in self.sector_names
             ]
         else:
-            raise ValueError("intra_sector_correlations must be float or dict")
+            raise ValidationError("intra_sector_correlations must be float or dict")
 
         # Per-obligor sector loading rho_i: an asset's own intra_sector_correlation
         # when set, else its sector's value. This is what both backends actually
@@ -402,12 +405,14 @@ class CreditPortfolio(BaseSimulator):
         n = len(self.sector_names)
         if isinstance(raw, str):
             if raw != "match_intra":
-                raise ValueError(
+                raise ValidationError(
                     f"systematic_lgd_correlation string must be 'match_intra', got {raw!r}"
                 )
             return [float(np.sqrt(max(0.0, c))) for c in self.intra_sector_correlations]
         if isinstance(raw, bool):
-            raise ValueError("systematic_lgd_correlation must be numeric, not bool")
+            raise ValidationError(
+                "systematic_lgd_correlation must be numeric, not bool"
+            )
         if isinstance(raw, (int, float)):
             return [float(raw)] * n
         if isinstance(raw, dict):
@@ -415,12 +420,12 @@ class CreditPortfolio(BaseSimulator):
         if isinstance(raw, (list, tuple, np.ndarray)):
             vals = [float(v) for v in raw]
             if len(vals) != n:
-                raise ValueError(
+                raise ValidationError(
                     "systematic_lgd_correlation list must have one value per "
                     f"sector ({n}), got {len(vals)}"
                 )
             return vals
-        raise ValueError(
+        raise ValidationError(
             "systematic_lgd_correlation must be a float, list, dict, or 'match_intra'"
         )
 
@@ -428,11 +433,13 @@ class CreditPortfolio(BaseSimulator):
         """Validate portfolio configuration."""
         for corr in self.systematic_lgd_correlations:
             if not -1 <= corr <= 1:
-                raise ValueError("systematic_lgd_correlation must be between -1 and 1")
+                raise ValidationError(
+                    "systematic_lgd_correlation must be between -1 and 1"
+                )
 
         for corr in self.intra_sector_correlations:
             if not 0 <= corr <= 1:
-                raise ValueError(
+                raise ValidationError(
                     "All intra_sector_correlations must be between 0 and 1"
                 )
 
@@ -448,7 +455,7 @@ class CreditPortfolio(BaseSimulator):
             )
 
         if len(sector_counts) != len(self.sector_names):
-            raise ValueError("Some sectors have no assets")
+            raise ValidationError("Some sectors have no assets")
 
     def _infer_intra_correlations_from_assets(self) -> Optional[List[float]]:
         """Derive a per-sector *representative* intra-correlation from asset metadata.
@@ -494,7 +501,7 @@ class CreditPortfolio(BaseSimulator):
         else:
             arr = np.asarray(matrix, dtype=float)
             if arr.shape != (n_sectors, n_sectors):
-                raise ValueError(
+                raise ValidationError(
                     "sector_correlation_matrix must match number of sectors"
                 )
         return CorrelationMatrix(
@@ -574,11 +581,11 @@ class CreditPortfolio(BaseSimulator):
         period (see :mod:`simflux.portfolio.frailty`).
         """
         if n_simulations <= 0:
-            raise ValueError("n_simulations must be positive")
+            raise ValidationError("n_simulations must be positive")
         if n_periods <= 0:
-            raise ValueError("n_periods must be positive")
+            raise ValidationError("n_periods must be positive")
         if period_length <= 0:
-            raise ValueError("period_length must be positive")
+            raise ValidationError("period_length must be positive")
         # Resolve string sugar first so a bad mode fails before any work; the
         # timing object validates its own parameters at construction.
         timing = resolve_timing(default_timing, factor_persistence=factor_persistence)
@@ -601,7 +608,7 @@ class CreditPortfolio(BaseSimulator):
             if a.pd_term_structure is not None and len(a.pd_term_structure) < n_periods
         )
         if n_shorter:
-            raise RuntimeError(
+            raise ValidationError(
                 f"pd_term_structure shorter than n_periods ({n_periods}) for {n_shorter} "
                 "asset(s): there is no cumulative PD for the later periods, so the horizon "
                 "is under-specified. Provide one cumulative PD per period "
@@ -737,7 +744,7 @@ class CreditPortfolio(BaseSimulator):
                 # Keep the underlying Rust error visible: every Rust failure
                 # arrives as RuntimeError, and not all of them are storage
                 # problems — masking the message misattributes config errors.
-                raise RuntimeError(
+                raise BackendError(
                     "Rust backend failed with store_interim=True (interim storage "
                     "requires the Rust backend; disable store_interim or run in "
                     f"Python fallback mode). Underlying error: {exc}"
@@ -903,7 +910,7 @@ class CreditPortfolio(BaseSimulator):
             n_assets_per_sector = [n_assets_per_sector] * len(sectors)
 
         if len(n_assets_per_sector) != len(sectors):
-            raise ValueError("n_assets_per_sector must match number of sectors")
+            raise ValidationError("n_assets_per_sector must match number of sectors")
 
         inter_sector_correlation = kwargs.pop("inter_sector_correlation", None)
 

@@ -19,6 +19,12 @@ from .utils.random_utils import set_seed
 from .core.base import SimulationConfig
 from .core.engine import SimulationEngine
 from .core.backend import Backend
+from .exceptions import (
+    BackendError,
+    MemoryLimitError,
+    SimfluxError,
+    ValidationError,
+)
 
 __version__ = "0.7.0"
 __author__ = "SimFlux Contributors"
@@ -43,4 +49,9 @@ __all__ = [
     "SimulationEngine",
     "Backend",
     "set_seed",
+    # Exception hierarchy
+    "SimfluxError",
+    "ValidationError",
+    "BackendError",
+    "MemoryLimitError",
 ]

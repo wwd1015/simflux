@@ -21,15 +21,17 @@ from typing import Sequence, Sized
 
 import numpy as np
 
+from ..exceptions import ValidationError
+
 from ..utils.random_utils import validate_correlation_matrix_strict
 
 
 def validate_gbm_params(sigma: float, s0: float, *, s0_label: str = "s0") -> None:
     """Single-asset GBM parameter invariants: ``sigma > 0`` and ``s0 > 0``."""
     if sigma <= 0:
-        raise ValueError("sigma must be positive")
+        raise ValidationError("sigma must be positive")
     if s0 <= 0:
-        raise ValueError(f"{s0_label} must be positive")
+        raise ValidationError(f"{s0_label} must be positive")
 
 
 def validate_correlated_gbm_params(
@@ -45,19 +47,19 @@ def validate_correlated_gbm_params(
     definite."""
     n_assets = len(mu)
     if len(sigma) != n_assets:
-        raise ValueError("sigma must have same length as mu")
+        raise ValidationError("sigma must have same length as mu")
     if len(s0) != n_assets:
-        raise ValueError(f"{s0_label} must have same length as mu")
+        raise ValidationError(f"{s0_label} must have same length as mu")
 
     cm = np.asarray(correlation_matrix)
     if cm.shape != (n_assets, n_assets):
-        raise ValueError(f"correlation_matrix must be {n_assets}x{n_assets}")
+        raise ValidationError(f"correlation_matrix must be {n_assets}x{n_assets}")
 
     for i in range(n_assets):
         if sigma[i] <= 0:
-            raise ValueError(f"sigma[{i}] must be positive")
+            raise ValidationError(f"sigma[{i}] must be positive")
         if s0[i] <= 0:
-            raise ValueError(f"{s0_label}[{i}] must be positive")
+            raise ValidationError(f"{s0_label}[{i}] must be positive")
 
     validate_correlation_matrix_strict(cm)
 
@@ -71,9 +73,9 @@ def validate_time_varying_params(
     """Single-asset time-varying GBM invariants: each schedule's times and values
     have matching lengths.  Accepts lists or ndarrays (only lengths are read)."""
     if len(mu_times) != len(mu_values):
-        raise ValueError("mu_times and mu_values must have same length")
+        raise ValidationError("mu_times and mu_values must have same length")
     if len(sigma_times) != len(sigma_values):
-        raise ValueError("sigma_times and sigma_values must have same length")
+        raise ValidationError("sigma_times and sigma_values must have same length")
 
 
 def validate_time_varying_correlated_params(
@@ -85,9 +87,9 @@ def validate_time_varying_correlated_params(
     """Multi-asset time-varying GBM invariants: one schedule per asset, and a
     positive-definite correlation matrix.  Accepts lists or ndarrays."""
     if len(mu_times) != n_assets:
-        raise ValueError("Must provide mu time series for each asset")
+        raise ValidationError("Must provide mu time series for each asset")
     if len(sigma_times) != n_assets:
-        raise ValueError("Must provide sigma time series for each asset")
+        raise ValidationError("Must provide sigma time series for each asset")
     validate_correlation_matrix_strict(
         np.asarray(correlation_matrix), name="correlation_matrix"
     )

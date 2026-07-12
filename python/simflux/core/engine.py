@@ -4,6 +4,7 @@ import numpy as np
 from typing import Optional, List, Any
 from .base import SimulationConfig, check_memory
 from .backend import Backend
+from ..exceptions import BackendError, ValidationError
 from .validation import (
     validate_gbm_params,
     validate_correlated_gbm_params,
@@ -16,11 +17,11 @@ from ..utils.random_utils import safe_cholesky
 def _validate_sim_dims(n_paths: int, n_steps: int, T: float) -> None:
     """Shared validation for simulation dimension parameters."""
     if n_paths <= 0:
-        raise ValueError("n_paths must be positive")
+        raise ValidationError("n_paths must be positive")
     if n_steps <= 0:
-        raise ValueError("n_steps must be positive")
+        raise ValidationError("n_steps must be positive")
     if T <= 0:
-        raise ValueError("T must be positive")
+        raise ValidationError("T must be positive")
 
 
 class SimulationEngine:
@@ -183,7 +184,7 @@ class SimulationEngine:
         # so asarray is zero-copy rather than re-parsing/boxing every element.
         paths = np.asarray(getattr(_rust, fn_name)(**kwargs))
         if paths.shape != expected_shape:
-            raise RuntimeError(
+            raise BackendError(
                 f"Rust backend '{fn_name}' returned shape {paths.shape}, "
                 f"expected {expected_shape}; Python/Rust marshalling is out of sync."
             )

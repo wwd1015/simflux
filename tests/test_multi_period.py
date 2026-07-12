@@ -162,7 +162,9 @@ class TestSubHorizonTermStructure:
     def test_shorter_curve_raises(self):
         assets = _make_assets(n=5, pd=0.10, ts=[0.02, 0.05])  # only 2 points
         p = sf.CreditPortfolio(assets=assets, intra_sector_correlations=0.2)
-        with pytest.raises(RuntimeError, match="shorter than n_periods"):
+        # An under-specified horizon is a parameter problem: ValidationError
+        # (a ValueError subclass) since 0.7.0, previously a RuntimeError.
+        with pytest.raises(sf.ValidationError, match="shorter than n_periods"):
             p.simulate(n_simulations=50, n_periods=4)
 
 

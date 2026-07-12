@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Any, Callable
 
+from ..exceptions import MemoryLimitError, ValidationError
+
 
 @dataclass
 class SimulationConfig:
@@ -38,9 +40,9 @@ class SimulationConfig:
     def validate(self) -> None:
         """Raise ``ValueError`` if any field is invalid."""
         if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
+            raise ValidationError("batch_size must be positive")
         if self.memory_limit_gb is not None and self.memory_limit_gb <= 0:
-            raise ValueError("memory_limit_gb must be positive")
+            raise ValidationError("memory_limit_gb must be positive")
 
 
 def check_memory(
@@ -59,14 +61,14 @@ def check_memory(
 
     Raises
     ------
-    MemoryError
+    MemoryLimitError
         If estimated memory exceeds ``memory_limit_gb``.
     """
     if config.memory_limit_gb is None:
         return
     estimated_gb = (n_elements * element_bytes) / (1024**3)
     if estimated_gb > config.memory_limit_gb:
-        raise MemoryError(
+        raise MemoryLimitError(
             f"Estimated memory usage ({estimated_gb:.2f} GB) exceeds limit "
             f"({config.memory_limit_gb:.2f} GB). Reduce n_paths/n_steps or "
             f"increase memory_limit_gb."
