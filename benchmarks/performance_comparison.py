@@ -9,6 +9,7 @@ This benchmark script compares:
 5. Scalability across different problem sizes
 """
 
+import statistics
 import time
 import sys
 import json
@@ -24,6 +25,12 @@ import os
 
 # Import simflux with both backends
 import simflux as sf
+
+# Steady-state timing repeats per workload; the reported time is their median.
+# A coefficient of variation above UNSTABLE_CV marks the row as unstable —
+# environment noise, not a backend difference.
+TIMING_REPEATS = 5
+UNSTABLE_CV = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -121,10 +128,13 @@ def run_worker(spec: Dict) -> Dict:
 
     # Memory comes from the FIRST call (peak RSS is a lifetime high-water mark
     # and cannot be reset, so it must be read before any repeat), exactly as
-    # this harness always measured it. Time comes from a SECOND call: the first
-    # call of a session pays one-time costs that aren't the simulation (lazy
-    # scipy imports, thread-pool spinup, allocator growth), and steady-state
-    # cost is what a backend comparison is about.
+    # this harness always measured it. Time comes from steady-state repeats:
+    # the first call of a session pays one-time costs that aren't the
+    # simulation (lazy scipy imports, thread-pool spinup, allocator growth),
+    # and steady-state cost is what a backend comparison is about. The
+    # headline is the MEDIAN of the repeats with its coefficient of variation
+    # alongside, so an unstable environment is visible instead of silently
+    # contaminating a published number.
     gc.collect()
     rss_before = _rss_mb()
     try:
@@ -134,16 +144,23 @@ def run_worker(spec: Dict) -> Dict:
     peak = _peak_rss_mb()  # result is still alive, so its allocation is counted
     del result
 
-    start = time.perf_counter()
+    times = []
     try:
-        result = call()
+        for _ in range(TIMING_REPEATS):
+            start = time.perf_counter()
+            result = call()
+            times.append(time.perf_counter() - start)
+            del result
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc)}
-    elapsed = time.perf_counter() - start
-    del result
+
+    median = statistics.median(times)
+    mean = statistics.fmean(times)
+    cv = (statistics.stdev(times) / mean) if (len(times) > 1 and mean > 0) else 0.0
     return {
         "success": True,
-        "time": elapsed,
+        "time": median,
+        "time_cv": cv,
         "memory_mb": max(0.0, peak - rss_before),
     }
 
@@ -187,6 +204,7 @@ class BenchmarkRunner:
             }
         return {
             "execution_time": data["time"],
+            "time_cv": data.get("time_cv", 0.0),
             "memory_used_mb": data["memory_mb"],
             "success": True,
             "error": None,
@@ -223,6 +241,8 @@ class BenchmarkRunner:
                 "current_backend_memory": current_result["memory_used_mb"],
                 "numpy_time": numpy_result["execution_time"],
                 "numpy_memory": numpy_result["memory_used_mb"],
+                "current_time_cv": current_result.get("time_cv", 0.0),
+                "numpy_time_cv": numpy_result.get("time_cv", 0.0),
                 "current_success": current_result["success"],
                 "numpy_success": numpy_result["success"],
             }
@@ -238,11 +258,15 @@ class BenchmarkRunner:
                 result_entry["memory_ratio"] = memory_ratio
 
                 print(
-                    f"  Current Backend: {current_result['execution_time']:.3f}s, "
+                    f"  Current Backend: {current_result['execution_time']:.3f}s "
+                    f"(median of {TIMING_REPEATS}, cv={current_result['time_cv']:.1%}"
+                    f"{' UNSTABLE' if current_result['time_cv'] > UNSTABLE_CV else ''}), "
                     f"{current_result['memory_used_mb']:.1f}MB"
                 )
                 print(
-                    f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s, "
+                    f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s "
+                    f"(median of {TIMING_REPEATS}, cv={numpy_result['time_cv']:.1%}"
+                    f"{' UNSTABLE' if numpy_result['time_cv'] > UNSTABLE_CV else ''}), "
                     f"{numpy_result['memory_used_mb']:.1f}MB"
                 )
                 mem_x = current_result["memory_used_mb"] / max(
@@ -296,6 +320,8 @@ class BenchmarkRunner:
                 "current_backend_memory": current_result["memory_used_mb"],
                 "numpy_time": numpy_result["execution_time"],
                 "numpy_memory": numpy_result["memory_used_mb"],
+                "current_time_cv": current_result.get("time_cv", 0.0),
+                "numpy_time_cv": numpy_result.get("time_cv", 0.0),
                 "current_success": current_result["success"],
                 "numpy_success": numpy_result["success"],
             }
@@ -311,11 +337,15 @@ class BenchmarkRunner:
                 result_entry["memory_ratio"] = memory_ratio
 
                 print(
-                    f"  Current Backend: {current_result['execution_time']:.3f}s, "
+                    f"  Current Backend: {current_result['execution_time']:.3f}s "
+                    f"(median of {TIMING_REPEATS}, cv={current_result['time_cv']:.1%}"
+                    f"{' UNSTABLE' if current_result['time_cv'] > UNSTABLE_CV else ''}), "
                     f"{current_result['memory_used_mb']:.1f}MB"
                 )
                 print(
-                    f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s, "
+                    f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s "
+                    f"(median of {TIMING_REPEATS}, cv={numpy_result['time_cv']:.1%}"
+                    f"{' UNSTABLE' if numpy_result['time_cv'] > UNSTABLE_CV else ''}), "
                     f"{numpy_result['memory_used_mb']:.1f}MB"
                 )
                 mem_x = current_result["memory_used_mb"] / max(
@@ -367,6 +397,8 @@ class BenchmarkRunner:
                 "current_backend_memory": current_result["memory_used_mb"],
                 "numpy_time": numpy_result["execution_time"],
                 "numpy_memory": numpy_result["memory_used_mb"],
+                "current_time_cv": current_result.get("time_cv", 0.0),
+                "numpy_time_cv": numpy_result.get("time_cv", 0.0),
                 "current_success": current_result["success"],
                 "numpy_success": numpy_result["success"],
             }
@@ -382,11 +414,15 @@ class BenchmarkRunner:
                 result_entry["memory_ratio"] = memory_ratio
 
                 print(
-                    f"  Current Backend: {current_result['execution_time']:.3f}s, "
+                    f"  Current Backend: {current_result['execution_time']:.3f}s "
+                    f"(median of {TIMING_REPEATS}, cv={current_result['time_cv']:.1%}"
+                    f"{' UNSTABLE' if current_result['time_cv'] > UNSTABLE_CV else ''}), "
                     f"{current_result['memory_used_mb']:.1f}MB"
                 )
                 print(
-                    f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s, "
+                    f"  NumPy Fallback:  {numpy_result['execution_time']:.3f}s "
+                    f"(median of {TIMING_REPEATS}, cv={numpy_result['time_cv']:.1%}"
+                    f"{' UNSTABLE' if numpy_result['time_cv'] > UNSTABLE_CV else ''}), "
                     f"{numpy_result['memory_used_mb']:.1f}MB"
                 )
                 mem_x = current_result["memory_used_mb"] / max(
@@ -485,11 +521,15 @@ class BenchmarkRunner:
 
             if not successful_test.empty:
                 for _, row in successful_test.iterrows():
+                    worst_cv = max(
+                        row.get("current_time_cv", 0.0), row.get("numpy_time_cv", 0.0)
+                    )
                     report.append(
                         f"  {row['size']:15} | "
                         f"Current: {row['current_backend_time']:6.3f}s | "
                         f"NumPy: {row['numpy_time']:6.3f}s | "
                         f"Speedup: {row['speedup']:5.1f}x"
+                        + (" (UNSTABLE)" if worst_cv > UNSTABLE_CV else "")
                     )
 
             report.append("")

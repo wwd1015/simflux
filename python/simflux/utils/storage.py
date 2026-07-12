@@ -1,13 +1,24 @@
 """Storage utilities for simulation results using Parquet format."""
 
+from __future__ import annotations
+
 import json
 import warnings
-import polars as pl
-import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Any, Optional, List, Dict, Union
+from typing import TYPE_CHECKING, Any, Optional, List, Dict, Union
 from dataclasses import dataclass
+
+from ._lazy import LazyModule
+
+# polars is deferred to first use (it backs only ParquetResultsAnalyzer) so
+# `import simflux` doesn't pay its import cost; pandas appears in annotations
+# only (export_to_pandas returns via polars' .to_pandas()).
+if TYPE_CHECKING:
+    import pandas as pd
+    import polars as pl
+else:
+    pl = LazyModule("polars")
 
 
 @dataclass

@@ -20,10 +20,13 @@ portfolios, where the chunked scipy fallback runs in under 2 MB.
 
 ## Methodology
 
-- **Timing**: wall-clock `time.perf_counter()` around one **steady-state**
-  simulation call — each worker runs the workload once untimed (absorbing
-  one-time costs such as lazy scipy imports and thread-pool spinup) and times
-  the second call.
+- **Timing**: wall-clock `time.perf_counter()` around **steady-state** calls —
+  each worker runs the workload once untimed (absorbing one-time costs such as
+  lazy scipy imports and thread-pool spinup), then times 5 repeats and reports
+  their **median**. Each row carries the repeats' coefficient of variation;
+  rows exceeding 5% CV are flagged **UNSTABLE** and should be treated as
+  environment noise (CPU contention, frequency scaling), not backend signal —
+  re-run on a quiet machine rather than publishing them.
 - **Memory**: each (workload, backend) runs in its own **subprocess**, and memory
   is the kernel's **peak RSS** (`ru_maxrss`) reached during the first call above
   the pre-call baseline. Subprocess isolation prevents GC and allocator caching

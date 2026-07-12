@@ -7,13 +7,13 @@ unless noted.
 
 ## Performance
 
-### P1. Lazy-import pandas/polars at the package boundary
-`import simflux` costs ~0.52s, of which ~0.35s is pandas (pulled in eagerly by
-`utils/storage.py` through the package `__init__` chain) plus polars. Both are
-needed only by `AssetData.from_dataframe` and `ParquetResultsAnalyzer`.
-Deferring those imports to first use would cut cold `import simflux` by ~60–70%
-— it matters for CLIs, notebooks, and serverless workers. Low risk; needs a
-module-`__getattr__` or in-function imports plus an import-time regression test.
+### P1. Lazy-import pandas/polars at the package boundary — **done (0.7.0)**
+`import simflux` cost ~0.52s, of which ~0.35s was pandas (pulled in eagerly by
+`utils/storage.py` through the package `__init__` chain) plus polars — both
+needed only by `AssetData.from_dataframe` and `ParquetResultsAnalyzer`. They
+are now deferred (`utils/_lazy.py` proxy for polars; a `sys.modules` check for
+the DataFrame `isinstance`), cutting `import simflux` to ~0.10–0.15s.
+`tests/test_import_hygiene.py` pins the property.
 
 ### P2. Correlated-GBM sampling throughput
 The correlated kernels are now bound by normal sampling (`StdRng`/ChaCha12 +
@@ -83,13 +83,13 @@ The benchmark tooling became honest this release (steady-state timing,
 subprocess isolation, fabricated reports deleted). What would make it
 rigorous:
 
-### M1. Report dispersion, not just a point estimate
-`performance_comparison.py` times one steady-state call;
-`regression_benchmark.py` reports best-of-N and median but not spread. Both
-should run N ≥ 5 repeats and report median with an interquartile range, and
-flag results whose coefficient of variation exceeds a threshold (e.g. 5%) as
-unstable-environment rather than publishing them. This session demonstrated
-why: identical code measured ~10% apart under container CPU-state changes.
+### M1. Report dispersion, not just a point estimate — **done (0.7.0)**
+Both harnesses now time N repeats and report the **median** with IQR
+(regression) or coefficient of variation (comparison); rows whose CV exceeds
+5% are flagged **UNSTABLE** in the console, the report, and the JSON, and the
+regression tool's `--compare` carries the flag through. The first run after
+landing this immediately flagged 17–23% CV on a busy container — exactly the
+condition that previously masqueraded as a code regression.
 
 ### M2. Capture the environment in every report
 `regression_benchmark.py` already stamps version/backend/Python/machine. Both

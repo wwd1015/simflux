@@ -37,6 +37,13 @@ seeded GBM output bit-identical to v0.6.0.
 
 ### Performance
 
+- **`import simflux` is ~4–5x faster** (~0.52s → ~0.10–0.15s): pandas and
+  polars — needed only by `AssetData.from_dataframe` and
+  `ParquetResultsAnalyzer` — are no longer imported eagerly through the
+  package `__init__` chain. polars loads lazily on first analyzer use
+  (`utils/_lazy.py`); the DataFrame `isinstance` check consults `sys.modules`
+  so pandas loads only for callers who actually pass a DataFrame.
+  `tests/test_import_hygiene.py` pins the property in a fresh interpreter.
 - **The first portfolio `simulate()` of a session is ~5x faster to start**
   (~0.96s → ~0.2s): the timing plan's normal quantile now imports
   `scipy.special.ndtri` (the exact kernel `scipy.stats.norm.ppf` dispatches to
@@ -89,6 +96,13 @@ seeded GBM output bit-identical to v0.6.0.
   as backend cost — previously the small-portfolio "Rust" row was ~200x
   overstated because it was mostly the scipy import. Memory is still measured
   on the first call (peak RSS is a lifetime high-water mark).
+- **Both benchmark harnesses report dispersion, not a point estimate.**
+  Timing is now the median of N steady-state repeats; each row carries the
+  repeats' coefficient of variation and is flagged **UNSTABLE** above 5% CV
+  (console, report, and JSON — `regression_benchmark.py --compare` carries the
+  flag through), so environment noise is visible instead of masquerading as a
+  performance delta. The regression tool also records cpu_count, load average,
+  and the NumPy version alongside its existing metadata.
 - **`docs/performance_benchmarks.md` and the README carried stale numbers**
   (pre-chunking fallback memory claims and cold-call timings). Both now carry
   fresh measurements from this release with the hardware stated, including the

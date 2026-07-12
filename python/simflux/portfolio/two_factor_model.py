@@ -1,11 +1,26 @@
 """Two-factor portfolio loss simulation model (Merton framework)."""
 
+from __future__ import annotations
+
 import numpy as np
-import pandas as pd
+import sys
 import warnings
 from math import sqrt
-from typing import List, Optional, Dict, Any, Union, TypedDict, NotRequired, cast
+from typing import (
+    TYPE_CHECKING,
+    List,
+    Optional,
+    Dict,
+    Any,
+    Union,
+    TypedDict,
+    NotRequired,
+    cast,
+)
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    import pandas as pd
 from ..core.base import BaseSimulator, SimulationConfig
 from ..core.backend import Backend
 from ..utils.storage import StorageConfig, ParquetResultsAnalyzer
@@ -13,6 +28,17 @@ from ..utils.random_utils import CorrelationMatrix
 from .default_timing import DefaultTiming, resolve_timing
 from .inputs import PortfolioInputs
 from .numpy_simulation import simulate_portfolio_numpy
+
+
+def _is_pandas_dataframe(obj: Any) -> bool:
+    """True iff ``obj`` is a pandas DataFrame, without importing pandas.
+
+    If pandas has never been imported in this process, ``obj`` cannot be a
+    DataFrame — so checking ``sys.modules`` first keeps pandas off the
+    package's import path (it loads only for callers who actually pass one).
+    """
+    pandas = sys.modules.get("pandas")
+    return pandas is not None and isinstance(obj, pandas.DataFrame)
 
 
 @dataclass
@@ -111,7 +137,7 @@ class AssetData:
     @classmethod
     def from_dataframe(
         cls,
-        df: pd.DataFrame,  # type: ignore[name-defined]
+        df: pd.DataFrame,
         sector_mapping: Optional[Dict[str, int]] = None,
     ) -> List["AssetData"]:
         """
@@ -140,6 +166,9 @@ class AssetData:
         missing_columns = set(required_columns) - set(df.columns)
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
+
+        # Free here: the caller handed us a DataFrame, so pandas is loaded.
+        import pandas as pd
 
         if sector_mapping is None:
             unique_sectors = df["sector"].unique()
@@ -272,10 +301,10 @@ class CreditPortfolio(BaseSimulator):
             )
 
         # Process assets input
-        if isinstance(assets, pd.DataFrame):
+        if _is_pandas_dataframe(assets):
             self.assets = AssetData.from_dataframe(assets)
         else:
-            self.assets = assets
+            self.assets = cast(List[AssetData], assets)
 
         if not self.assets:
             raise ValueError("No assets provided")
