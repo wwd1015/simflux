@@ -5,6 +5,12 @@ work. Each item states the evidence behind it (measured on this repo's
 benchmark tooling where applicable) and its trade-off. Items are independent
 unless noted.
 
+**Status:** P1, Q1, Q2, M1, M3, and M5 shipped in 0.7.0 (marked **done**
+below, with measured outcomes). The remaining items are **deliberately
+tabled**: P2 needs an RNG stream-compatibility policy decision, M4/P4 need a
+CI-runner strategy, Q4 needs a publishing decision, and P3/P5/Q3/Q5/M2/M6/M7
+are queued behind those or awaiting prioritization.
+
 ## Performance
 
 ### P1. Lazy-import pandas/polars at the package boundary — **done (0.7.0)**

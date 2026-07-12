@@ -114,6 +114,12 @@ seeded GBM output bit-identical to v0.6.0.
 
 ### Fixed
 
+- **A latent flaky memory test.** `test_storage`'s memory check divided two
+  allocator-noise-level RSS deltas and passed only by test-ordering luck
+  (surfaced by the lazy-polars change). It now warms the full storage path
+  once — polars' first operation initializes its thread pool and Parquet
+  reader — and asserts an absolute per-run bound, which is what "no dense
+  per-row grid" actually means.
 - **`benchmarks/performance_comparison.py` timed cold first calls.** Each
   isolated worker now warms up once and times the steady-state second call, so
   one-time costs (lazy scipy imports, thread-pool spinup) no longer masquerade

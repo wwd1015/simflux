@@ -17,6 +17,7 @@ make build                   # Build release
 ### Module Layout
 ```
 python/simflux/
+  exceptions.py - Typed error hierarchy (SimfluxError -> ValidationError/BackendError/MemoryLimitError), exported top-level
   core/       - Backend (registry), SimulationEngine (Rust/NumPy dispatcher), BaseSimulator (ABC), SimulationConfig
   processes/  - GBM, CorrelatedGBM, TimeVaryingGBM, TimeVaryingCorrelatedGBM
   portfolio/  - CreditPortfolio (credit loss model), AssetData, TwoFactorCorrelationStructure,
@@ -53,7 +54,7 @@ User API → Simulator class → validate_inputs() → SimulationEngine
 - Python 3.12+ required
 - Dataclasses for configuration (SimulationConfig, StorageConfig, AssetData)
 - Correlation matrices validated: symmetric, diagonal=1, values in [-1,1], positive definite
-- `safe_cholesky()` in `utils/random_utils.py` is the **single** decompose-or-repair primitive every correlated sampler crosses — it repairs near-singular matrices and raises `ValueError` (never a raw `LinAlgError`). Do not call `np.linalg.cholesky` directly in samplers.
+- `safe_cholesky()` in `utils/random_utils.py` is the **single** decompose-or-repair primitive every correlated sampler crosses — it repairs near-singular matrices and raises `ValidationError` (never a raw `LinAlgError`). Do not call `np.linalg.cholesky` directly in samplers.
 - `CorrelationMatrix` (`utils/random_utils.py`) is the validated correlation-matrix **value type**: construction runs the strict validator once (shared `CORRELATION_TOLERANCE`); instances carry a lazily cached `cholesky()` (via `safe_cholesky`) and `tolist()` for the FFI. It is **internal currency only** — public seams accept raw arrays and construct it at their validation seam. Never re-implement symmetry/eigenvalue/bounds checks with literal tolerances; use the value type or `correlation_matrix_diagnostics()`.
 - Validation is split by *kind*, not by location. **Parameter invariants** (`sigma>0`, `s0>0`, matching lengths, positive-definite correlation) are written **once** as shared validators in `core/validation.py` and called from **both** seams that need them: the simulator constructor (`validate_inputs`, for early/clear construction-time errors) and `SimulationEngine` (which is independently callable, so it self-validates). One validator, two call sites — no copy-paste, all four GBM-family simulators consistent. The `s0_label` argument lets each seam name the parameter as its caller passed it (`S0` on the simulator, `s0` on the engine). **Per-run dimension invariants** (`n_paths`/`n_steps`/`T`) are not parameter invariants and remain solely on the engine (`_validate_sim_dims`).
 - **Default timing** is its own module (`portfolio/default_timing.py`): `simulate(default_timing=...)` takes a timing object (`Copula()`, `Frailty(persistence=...)`) or its string sugar; the `factor_persistence` kwarg is deprecated. The model's `plan()` derives a frozen `TimingPlan` — the `(n_periods, n_assets)` threshold matrix + per-period `factor_phi` — which is the **sole timing input both backends consume**; neither backend derives thresholds (the old staircase derivations were deleted). The **kernel** set (`"copula"`/`"frailty"`) is closed: a new derivation over an existing kernel is a pure-Python timing model; a new kernel needs inner loops in both backends + cross-validation. `portfolio/frailty.py` is the calibration implementation layer (`survival_curve` is the deterministic inverse the tests pin): `barrier_matrix` dedupes obligors by (rho, curve) and calibrates all distinct profiles through the vectorized `calibrate_barriers_batch`; the scalar `calibrate_barriers` is a single-column wrapper over the same implementation.
@@ -62,6 +63,7 @@ User API → Simulator class → validate_inputs() → SimulationEngine
 - All simulators inherit from BaseSimulator; SimulationEngine does NOT
 - Use `Backend.is_available()` / `Backend.get_rust()` for Rust detection — never module-level flags
 - `CORRELATION_TOLERANCE = 1e-8` shared constant for all validation (in `core/backend.py`)
+- **Errors**: raise the typed hierarchy from `simflux/exceptions.py` — `ValidationError` (parameter problems; also a `ValueError`), `BackendError` (backend contract violations; also a `RuntimeError`), `MemoryLimitError` (the pre-allocation guard; also a `MemoryError`) — never bare `ValueError`/`RuntimeError` at new raise sites. `pandas`/`polars` are lazily imported (`utils/_lazy.py`; `tests/test_import_hygiene.py` pins it) — never import them at module scope inside the package.
 - Tests mock via `@patch.object(Backend, 'is_available', ...)` and `@patch.object(Backend, 'get_rust')`; cross-validation forces the NumPy backend through the **public** seam under these patches (never private `_numpy_*` methods)
 
 ## Dual-Implementation & Cross-Validation

@@ -132,7 +132,10 @@ python benchmarks/performance_comparison.py
 Full CSV/text reports are written alongside. To compare two SimFlux versions
 on the *same* backend (e.g. before/after an optimization), use
 `python benchmarks/regression_benchmark.py` — it times a fixed set of seeded
-workloads and writes JSON that its `--compare` mode diffs.
+workloads and writes JSON that its `--compare` mode diffs. Its `--scaling`
+mode sweeps `RAYON_NUM_THREADS` over 1/2/N and reports per-kernel parallel
+efficiency (on the machine measured here: portfolio 95%, correlated GBM 86%,
+single-asset GBM ~68% at 4 threads — the latter is memory-bandwidth-bound).
 
 To measure the Rust kernels in isolation (no plan derivation, FFI, or
 marshalling in the loop), run the criterion micro-benchmarks:

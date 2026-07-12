@@ -548,8 +548,9 @@ What seeding does and does not promise:
 For maintained, repeatable measurements use the two benchmark scripts:
 
 ```bash
-python benchmarks/performance_comparison.py   # Rust vs NumPy backends (time + peak RSS)
-python benchmarks/regression_benchmark.py     # this build vs another build (seeded workloads, JSON + --compare)
+python benchmarks/performance_comparison.py         # Rust vs NumPy backends (time + peak RSS)
+python benchmarks/regression_benchmark.py           # this build vs another build (seeded workloads, JSON + --compare)
+python benchmarks/regression_benchmark.py --scaling # parallel efficiency at 1/2/N Rayon threads
 ```
 
 Measured results and methodology live in
@@ -624,14 +625,42 @@ will be lower, but functionality remains intact.
 
 ## 6. Troubleshooting
 
+### Error types
+
+Everything SimFlux raises deliberately derives from `simflux.SimfluxError`,
+so one clause catches it all — and each type also subclasses the builtin it
+historically was, so existing `except ValueError` / `except RuntimeError`
+code keeps working:
+
+- `simflux.ValidationError` (a `ValueError`) — invalid model or run
+  parameters: bad correlation matrix, negative sigma, inconsistent term
+  structures. Fix the inputs.
+- `simflux.BackendError` (a `RuntimeError`) — the Rust backend violated its
+  contract or failed internally. Not an input problem; check the build and
+  environment.
+- `simflux.MemoryLimitError` (a `MemoryError`) — the configured
+  `memory_limit_gb` guard rejected the run *before* allocating. Reduce
+  `n_paths`/`n_steps` or raise the limit.
+
+```python
+import simflux as sf
+
+try:
+    sf.GBM(mu=0.05, sigma=-0.2, S0=100)
+except sf.ValidationError as exc:
+    print(f"bad parameters: {exc}")
+```
+
+### Common issues
+
 - **Performance seems slow**: Install the Rust-enabled wheel from PyPI or
   run `pip install maturin && maturin develop --release` to build locally.
 - **Need interim results**: Interim Parquet storage requires the compiled Rust
   backend. Without it, requesting `store_interim=True` emits a `RuntimeWarning`
   and the simulation proceeds **without** persistence (it does not raise). A
-  `RuntimeError` is raised only when the Rust backend is present but its writer
-  fails.
-- **`ValueError: sector_correlation_matrix must be positive definite`**: the
+  `BackendError` (a `RuntimeError` subclass) is raised only when the Rust
+  backend is present but its writer fails.
+- **`ValidationError: sector_correlation_matrix must be positive definite`**: the
   sector correlation matrix must be strictly positive definite (a singular /
   rank-deficient matrix — e.g. two perfectly correlated sectors — is rejected at
   construction, identically on both backends).

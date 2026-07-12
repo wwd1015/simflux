@@ -57,6 +57,10 @@ SimFlux uses a hybrid Python/Rust architecture:
 - Direct time series input: `mu_times/mu_values`, `sigma_times/sigma_values`
 - NumPy fallback preserved transparently when Rust unavailable
 
+### exceptions.py
+- The typed error hierarchy every deliberate raise site uses: `SimfluxError` → `ValidationError` (also a `ValueError`), `BackendError` (also a `RuntimeError`), `MemoryLimitError` (also a `MemoryError`) — exported at the top level
+- One `except SimfluxError` catches anything SimFlux raises deliberately; the builtin bases keep pre-0.7.0 `except ValueError`/`RuntimeError` callers working
+
 ### portfolio/two_factor_model.py
 - `AssetData`: Credit asset parameters (PD, LGD, exposure, sector)
 - `PortfolioResult`: `TypedDict` documenting the result contract **both backends honor** — same key set (`portfolio_statistics`, `sector_statistics`, `n_trials`, plus metadata); `analyzer` only when interim results are stored
