@@ -74,6 +74,17 @@ seeded GBM output bit-identical to v0.6.0.
 
 ### Added
 
+- **Property-based tests** (`tests/test_properties.py`, hypothesis,
+  derandomized): invariants over arbitrary valid inputs — random
+  positive-definite correlation matrices factor exactly; the scipy-free
+  special-function fallbacks stay within measured error bounds; copula plans
+  are exact staircase quantiles, monotone in PD; and the frailty calibration
+  reproduces the marginal cumulative PD for arbitrary curves, correlations,
+  persistences, and grids.
+- **Rust kernel micro-benchmarks** (`benches/kernels.rs`, criterion;
+  `make bench-rust`): time the GBM/portfolio kernels and the Beta quantile
+  with no Python in the loop, separating kernel changes from plan-derivation/
+  FFI/marshalling noise in the Python harnesses.
 - **`benchmarks/regression_benchmark.py`** (`make benchmark-regression`): times
   a fixed set of seeded canonical workloads on the active backend and writes
   JSON, with a `--compare` mode — for comparing two SimFlux versions on the

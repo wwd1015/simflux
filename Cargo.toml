@@ -35,6 +35,15 @@ parquet = "54.0"
 
 [dev-dependencies]
 tempfile = "3"
+criterion = "0.5"
+
+# Kernel micro-benchmarks: time the Rust kernels without Python in the loop,
+# so kernel changes are measured free of plan-derivation/FFI/marshalling noise
+# (the Python harnesses measure the end-to-end number). Run via
+# `cargo bench --no-default-features` (same linking caveat as `cargo test`).
+[[bench]]
+name = "kernels"
+harness = false
 
 # Wheel builds go through this profile (maturin --release). Fat LTO +
 # a single codegen unit lets LLVM inline across crate boundaries (rand,

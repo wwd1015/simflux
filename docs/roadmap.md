@@ -48,12 +48,15 @@ most of the I/O time on storage-heavy runs.
 
 ## Quality and robustness
 
-### Q1. Property-based tests (hypothesis)
-The suite pins analytic limits and behavioral invariants at fixed points.
-Hypothesis would generalize them: correlation-matrix repair idempotence,
-timing-plan monotonicity for arbitrary valid PD curves, loss-statistics
-coherence (ES ≥ VaR, monotone quantiles) for arbitrary books. Highest-value
-new-test investment: it explores the input space the fixed-point tests can't.
+### Q1. Property-based tests (hypothesis) — **done (0.7.0)**
+`tests/test_properties.py` (derandomized for CI) asserts invariants over
+arbitrary valid inputs: random positive-definite correlation matrices factor
+exactly and pass diagnostics; `approx_norm_ppf` and the scipy-free `beta_ppf`
+stay within measured error bounds against references; copula plans are exact
+staircase quantiles, monotone in PD; and the frailty calibration reproduces
+the marginal cumulative PD for arbitrary curves, correlations, persistences,
+and grids. Remaining extension: loss-statistics coherence (ES ≥ VaR) needs the
+stats helper lifted out of `simulate_portfolio_numpy` to be directly testable.
 
 ### Q2. Typed exception taxonomy
 Errors surface as `ValueError`/`RuntimeError` with good messages but no types;
@@ -98,13 +101,13 @@ harnesses should also record: CPU model and core count, cgroup CPU quota
 frequency state where readable, NumPy/scipy/BLAS versions, and the simflux git
 SHA. A result without its environment is not comparable to anything.
 
-### M3. Separate kernel time from end-to-end time
-Python-level timing conflates plan derivation, FFI marshalling, and the Rust
-kernel — this session found a "Rust regression" that was actually Python-side
-calibration. Add `criterion` micro-benchmarks in Rust for the kernels
-themselves (`cargo bench`), so kernel changes are measured without Python
-noise, and keep the Python harness for the user-visible end-to-end number.
-Track both.
+### M3. Separate kernel time from end-to-end time — **done (0.7.0)**
+`benches/kernels.rs` (`make bench-rust`) times the GBM, correlated-GBM, and
+both portfolio kernels plus the Beta quantile with criterion — no plan
+derivation, FFI, or marshalling in the loop — so kernel changes are measured
+in isolation while the Python harnesses keep the end-to-end numbers. When the
+two disagree, the difference is the Python side (exactly the confusion that
+motivated this item).
 
 ### M4. Continuous benchmarking with regression gates
 Run `regression_benchmark.py` in CI on a fixed runner class, store the JSON

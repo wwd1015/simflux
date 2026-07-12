@@ -84,6 +84,9 @@ benchmark: ## Run Rust-vs-NumPy performance benchmarks
 benchmark-regression: ## Time canonical seeded workloads (JSON out; --compare to diff versions)
 	$(PYTHON) benchmarks/regression_benchmark.py
 
+bench-rust: ## Rust kernel micro-benchmarks (criterion; no Python in the loop)
+	cargo bench --no-default-features --bench kernels
+
 benchmark-quick: ## Run quick benchmark smoke test
 	$(PYTHON) -c "\
 import simflux as sf; \

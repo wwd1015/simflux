@@ -133,3 +133,10 @@ Full CSV/text reports are written alongside. To compare two SimFlux versions
 on the *same* backend (e.g. before/after an optimization), use
 `python benchmarks/regression_benchmark.py` — it times a fixed set of seeded
 workloads and writes JSON that its `--compare` mode diffs.
+
+To measure the Rust kernels in isolation (no plan derivation, FFI, or
+marshalling in the loop), run the criterion micro-benchmarks:
+
+```bash
+make bench-rust   # cargo bench --no-default-features --bench kernels
+```
