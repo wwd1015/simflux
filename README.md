@@ -44,18 +44,20 @@ maturin develop --release
 
 | Backend | Use Case | Performance | Memory Usage | Installation |
 |---------|----------|-------------|--------------|--------------|
-| **Rust** | Production | **~2.6–45x faster** | comparable to **much lower** | Binary wheel |
+| **Rust** | Production | **~2.4–49x faster** | lower to comparable | Binary wheel |
 | **NumPy Fallback** | Development | Baseline | Baseline | No compilation needed |
 
 ### Benchmark Results Summary
 
-Measured on Apple Silicon, release build (ratios are representative; absolute
-times are hardware-dependent):
+Measured on SimFlux 0.7.0 (4-core x86_64 Linux, Python 3.12, release build;
+ratios are representative — absolute times are hardware-dependent):
 
-- **GBM**: ~2.6–3.8x faster, ~0.4x the memory.
-- **Correlated GBM**: ~3–5x faster, memory at parity.
-- **Portfolio**: ~10–45x faster, **~8–25x less** memory (Rust streams per-trial;
-  the fallback reduces in bounded chunks).
+- **GBM**: ~3–5x faster, ~4x less memory.
+- **Correlated GBM**: ~2.4–7x faster, memory at parity.
+- **Portfolio**: **~30–49x faster**; memory is a small size-independent
+  constant (~15 MB thread pool + per-trial summaries), while the chunked
+  scipy fallback peaks under ~2 MB — neither backend allocates a dense
+  trials × assets grid.
 
 *See [`docs/performance_benchmarks.md`](docs/performance_benchmarks.md) for the
 full tables and methodology, and run `python benchmarks/performance_comparison.py`

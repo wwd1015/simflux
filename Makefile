@@ -78,8 +78,11 @@ test-fast: ## Run tests without benchmarks
 test-integration: ## Run integration tests only
 	$(PYTHON) -m pytest tests/test_integration.py -v
 
-benchmark: ## Run performance benchmarks
+benchmark: ## Run Rust-vs-NumPy performance benchmarks
 	$(PYTHON) benchmarks/performance_comparison.py
+
+benchmark-regression: ## Time canonical seeded workloads (JSON out; --compare to diff versions)
+	$(PYTHON) benchmarks/regression_benchmark.py
 
 benchmark-quick: ## Run quick benchmark smoke test
 	$(PYTHON) -c "\

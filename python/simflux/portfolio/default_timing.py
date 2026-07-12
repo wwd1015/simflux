@@ -42,11 +42,16 @@ def _norm_ppf(p: np.ndarray) -> np.ndarray:
 
     One quantile implementation now feeds both backends' copula thresholds, so
     threshold derivation can no longer drift between Rust and NumPy.
+
+    Uses ``scipy.special.ndtri`` — the kernel ``scipy.stats.norm.ppf``
+    dispatches to for a standard normal, so the values are identical — because
+    importing ``scipy.stats`` costs ~0.5s and dominated the first portfolio
+    ``simulate()`` of a session; ``scipy.special`` is much lighter.
     """
     try:
-        from scipy import stats as scipy_stats
+        from scipy.special import ndtri
 
-        return np.asarray(scipy_stats.norm.ppf(p), dtype=float)
+        return np.asarray(ndtri(p), dtype=float)
     except ImportError:
         return approx_norm_ppf(p)
 

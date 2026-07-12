@@ -119,15 +119,27 @@ def run_worker(spec: Dict) -> Dict:
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"build: {exc}"}
 
+    # Memory comes from the FIRST call (peak RSS is a lifetime high-water mark
+    # and cannot be reset, so it must be read before any repeat), exactly as
+    # this harness always measured it. Time comes from a SECOND call: the first
+    # call of a session pays one-time costs that aren't the simulation (lazy
+    # scipy imports, thread-pool spinup, allocator growth), and steady-state
+    # cost is what a backend comparison is about.
     gc.collect()
     rss_before = _rss_mb()
+    try:
+        result = call()
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": str(exc)}
+    peak = _peak_rss_mb()  # result is still alive, so its allocation is counted
+    del result
+
     start = time.perf_counter()
     try:
         result = call()
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc)}
     elapsed = time.perf_counter() - start
-    peak = _peak_rss_mb()  # result is still alive, so its allocation is counted
     del result
     return {
         "success": True,

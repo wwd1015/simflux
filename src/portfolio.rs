@@ -533,6 +533,16 @@ pub fn simulate_portfolio_losses(
     // samples, compares, and accumulates.
     let precomp = precompute_assets(config, assets, &correlation_structure, n_periods)?;
 
+    // Repack the thresholds into one contiguous asset-major buffer (stride
+    // n_periods) so the trial loop reads a flat slice instead of chasing one
+    // heap pointer per asset row. Rows longer than n_periods (a sub-horizon
+    // run over a longer pd_term_structure) are truncated to the simulated
+    // horizon, which is all the loop ever indexes.
+    let thresholds_flat: Vec<f64> = thresholds
+        .iter()
+        .flat_map(|row| row[..n_periods].iter().copied())
+        .collect();
+
     // Run simulations in parallel
     let trial_results: Vec<TrialResult> = (0..n_simulations)
         .into_par_iter()
@@ -542,7 +552,7 @@ pub fn simulate_portfolio_losses(
                 assets,
                 &precomp,
                 &all_factors,
-                thresholds,
+                &thresholds_flat,
                 n_periods,
                 period_length,
                 copula,
@@ -673,7 +683,7 @@ fn simulate_single_trial(
     assets: &[AssetData],
     precomp: &[AssetPrecomp],
     all_factors: &[Vec<f64>], // [period] -> flat trial-major (n_trials x n_sectors)
-    thresholds: &[Vec<f64>],  // [asset][period], from the timing plan (both kernels)
+    thresholds: &[f64],       // flat asset-major (n_assets x n_periods), from the timing plan
     n_periods: usize,
     period_length: f64,
     copula: bool,
@@ -698,15 +708,16 @@ fn simulate_single_trial(
         // (no per-asset scratch arrays) in the same float order as ever.
         let factors = &all_factors[0][trial_id * n_sectors..(trial_id + 1) * n_sectors];
         for (idx, pc) in precomp.iter().enumerate() {
+            let asset_thresholds = &thresholds[idx * n_periods..(idx + 1) * n_periods];
             let sector_factor = factors[pc.sector_index];
             let idio = sample_standard_normal(&mut rng);
             let value = pc.sector_loading * sector_factor + pc.idio_loading * idio;
 
-            if value <= thresholds[idx][n_periods - 1] {
+            if value <= asset_thresholds[n_periods - 1] {
                 // Default period = first k whose cumulative threshold is crossed.
                 let mut dperiod = n_periods - 1;
-                for k in 0..n_periods {
-                    if value <= thresholds[idx][k] {
+                for (k, &threshold) in asset_thresholds.iter().enumerate() {
+                    if value <= threshold {
                         dperiod = k;
                         break;
                     }
@@ -759,7 +770,7 @@ fn simulate_single_trial(
                 let idio = sample_standard_normal(&mut rng);
                 let value = pc.sector_loading * sector_factor + pc.idio_loading * idio;
 
-                if value <= thresholds[idx][period] {
+                if value <= thresholds[idx * n_periods + period] {
                     defaulted[idx] = true;
                     let (loss, recovery) = compute_loss(pc, period, sector_factor, &mut rng);
                     loss_amounts[idx] = loss;

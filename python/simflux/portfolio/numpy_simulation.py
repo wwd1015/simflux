@@ -63,10 +63,14 @@ def simulate_portfolio_numpy(inputs: PortfolioInputs) -> Dict[str, Any]:
     plan = inputs.plan
     n_periods = plan.n_periods
     try:
-        from scipy import stats as scipy_stats
-        from scipy.special import erf as scipy_erf
+        # betaincinv IS beta.ppf's kernel for a standard (loc=0, scale=1) Beta —
+        # identical values — but scipy.special imports in a fraction of
+        # scipy.stats's time, which matters on the first simulate() of a session.
+        from scipy.special import betaincinv, erf as scipy_erf
 
-        beta_ppf = scipy_stats.beta.ppf
+        def beta_ppf(q, a, b):  # scipy.stats argument order
+            return betaincinv(a, b, q)
+
         erf_func = scipy_erf
         have_scipy = True
     except ImportError:

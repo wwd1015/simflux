@@ -37,6 +37,14 @@ seeded GBM output bit-identical to v0.6.0.
 
 ### Performance
 
+- **The first portfolio `simulate()` of a session is ~5x faster to start**
+  (~0.96s → ~0.2s): the timing plan's normal quantile now imports
+  `scipy.special.ndtri` (the exact kernel `scipy.stats.norm.ppf` dispatches to
+  for a standard normal — identical values) instead of the much heavier
+  `scipy.stats`, and the NumPy portfolio adapter likewise uses
+  `scipy.special.betaincinv` (the kernel behind `scipy.stats.beta.ppf`).
+- **Timing-plan thresholds cross the trial loop as one contiguous asset-major
+  buffer** instead of a `Vec` per asset row.
 - **Release wheels build with fat LTO and a single codegen unit**
   (`[profile.release]` in `Cargo.toml`), letting LLVM inline the RNG and
   distribution crates into the Monte Carlo inner loops.
@@ -57,6 +65,14 @@ seeded GBM output bit-identical to v0.6.0.
   scratch arrays (the frailty kernel keeps its index-order reduce, and event
   detail arrays are now allocated only when interim storage is requested).
 
+### Added
+
+- **`benchmarks/regression_benchmark.py`** (`make benchmark-regression`): times
+  a fixed set of seeded canonical workloads on the active backend and writes
+  JSON, with a `--compare` mode — for comparing two SimFlux versions on the
+  same machine (complementing `performance_comparison.py`, which compares the
+  two backends of one build).
+
 ### Removed
 
 - **`benchmarks/benchmark_report_only.py` and
@@ -64,6 +80,20 @@ seeded GBM output bit-identical to v0.6.0.
   fabricated timings formatted as measurement reports. The real harness,
   `benchmarks/performance_comparison.py` (subprocess-isolated timing and peak
   RSS), remains and is what `make benchmark` runs.
+
+### Fixed
+
+- **`benchmarks/performance_comparison.py` timed cold first calls.** Each
+  isolated worker now warms up once and times the steady-state second call, so
+  one-time costs (lazy scipy imports, thread-pool spinup) no longer masquerade
+  as backend cost — previously the small-portfolio "Rust" row was ~200x
+  overstated because it was mostly the scipy import. Memory is still measured
+  on the first call (peak RSS is a lifetime high-water mark).
+- **`docs/performance_benchmarks.md` and the README carried stale numbers**
+  (pre-chunking fallback memory claims and cold-call timings). Both now carry
+  fresh measurements from this release with the hardware stated, including the
+  honest portfolio-memory picture: the chunked scipy fallback peaks under
+  ~2 MB while the Rust backend holds a small size-independent ~15 MB.
 
 ### For contributors
 
